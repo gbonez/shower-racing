@@ -1,0 +1,30 @@
+next shower racing:
+
+1. fix ocean in beach to surround the island, shrink the island by 50%
+
+2. increase item hitbox by 25%
+
+3. reduce bathroom bottle spawn to 1 bottle only. 1 bottle has 50% chance to spawn in bathroom on all maps except bathroom only, where all 3 spawn in bathroom
+
+4. fix bathroom door with wall on giant house
+
+5. new items: bottle radar where all bottles glow through walls until picked up (one spawns in the basement of scary maze template), loofa (rare item, super scrub brush where you get 50% scrub), crypt crown (same as kings crown), multiplayer exclusive items that affect other players positive or negatively
+
+6. all chat in lobby and winners spectating where users can type to each other, move leaderboard section to left side of ui when spectating, add option to end race in pause menu for host, allow host to select sequence of race maps (like map template order / random), last round of race add additional 10 seconds where users can see scores for the final race before returning to end screen, show all times on each map generated on end screen
+
+7. how possible would it be to see ghosts of other players when racing/spectating?
+
+8. let user walk on top of the bottle or clip through it
+
+9. adjust freeplay ui elements, paginate settings so button doesn't clip off screen
+
+10. logging to shower server console. 
+
+11. some sort of hazards that are map specific and debuff the player
+
+12. new map templates: (the chase - png of evil forrest screams and chases player at 50% player speed around the map, when caught you go back to the bathroom, when you get caught 3 times you lose the race automatically) (warehouse - one large room with catwalks and high rised celings. very tall with a lot of vertical movement, use a panel to turn the catwalks to access bottles) (the lab - big and open like warehouse, mix chemicals to create the 3 in 1 soap, beaker minigame needed) (power outage - spawn with flashlight, all rooms are dark) (monster movie - you are really big and have to jump onto tiny buildings in a tiny city to crush them. 3 buildings have the bottles hidden inside) (the doghouse - house map with a yard, yard has an angry dog that is chained to a pike in the ground, it wants to bite you and is guarding the soap, you have to get a bone to distract it) (golf course - where you have to putt a ball into a hole to get a bottle) (the lake - you have to fish and catch all 3 bottles) 
+
+13. working mirrors and character customization. 
+
+14. unique picture frame photos in each level
+
