@@ -5,13 +5,14 @@ extends CharacterBody3D
 # while it gets tired and rests; if the player lingers within reach it jumps to a random waypoint.
 # Picking it up calls calm(), which removes the limbs and stops it for good.
 
-const SPEED := 4.5  # 50% faster than the player's walking speed (3.0)
+const SPEED := 5.625  # 87.5% faster than the player's walking speed (3.0); 25% above the old 4.5
 const RUN_RADIUS := 12.0  # only runs when the player is this close
 const LIFT := 0.23  # body centre height while standing on its legs
 const GRAB_RANGE := 3.5  # the player's reach
 const GRAB_SECONDS := 5.0
-const RUN_SECONDS := 10.0
-const TIRED_SECONDS := 5.0
+const RUN_SECONDS := 15.0
+const TIRED_SECONDS := 1.0  # a quick trip and fall flat on its face
+const FACEPLANT := 1.45  # radians of forward tilt when it is down
 const ARRIVE := 0.2
 
 var threat: Node3D
@@ -36,10 +37,10 @@ func setup(color: Color, player: Node3D) -> void:
 		set_threat(player)
 	var cs := CollisionShape3D.new()
 	var shape := CylinderShape3D.new()
-	shape.radius = 0.09
-	shape.height = 0.46
+	shape.radius = 0.1125  # hitboxes are 25% bigger than the model
+	shape.height = 0.575
 	cs.shape = shape
-	cs.position = Vector3(0, 0.23, 0)
+	cs.position = Vector3(0, 0.2875, 0)
 	add_child(cs)
 	_mesh(0.05, 0.22, Vector3(0, LIFT, 0), color)
 	_mesh(0.025, 0.05, Vector3(0, LIFT + 0.135, 0), color)
@@ -120,9 +121,9 @@ func _physics_process(delta: float) -> void:
 		path.clear()
 
 
-# Slumps forward when tired.
+# Slumps forward when tired: it trips and lands on its face.
 func _rest_pose(delta: float, tired: bool) -> void:
-	rotation.x = lerpf(rotation.x, 0.4 if tired else 0.0, delta * 6.0)
+	rotation.x = lerpf(rotation.x, FACEPLANT if tired else 0.0, delta * (14.0 if tired else 7.0))
 
 
 func _goal_near_player() -> bool:
@@ -135,16 +136,7 @@ func _goal_near_player() -> bool:
 
 
 func _nearest_node(pos: Vector3) -> int:
-	var positions: Array = graph["pos"]
-	var best := -1
-	var best_cost := INF
-	for i in positions.size():
-		var p: Vector3 = positions[i]
-		var cost := Vector2(p.x - pos.x, p.z - pos.z).length() + absf(p.y - pos.y) * 3.0
-		if cost < best_cost:
-			best_cost = cost
-			best = i
-	return best
+	return NavPath.nearest_node(graph, pos)
 
 
 # Heads for whichever of a few random waypoints is farthest from the player.
@@ -172,43 +164,7 @@ func _pick_path() -> void:
 
 
 func _find_path(from: int, to: int) -> Array[int]:
-	var positions: Array = graph["pos"]
-	var links: Array = graph["links"]
-	var dist := PackedFloat32Array()
-	dist.resize(positions.size())
-	dist.fill(INF)
-	var prev := PackedInt32Array()
-	prev.resize(positions.size())
-	prev.fill(-1)
-	dist[from] = 0.0
-	var open: Array[int] = [from]
-	var done := {}
-	while not open.is_empty():
-		var best_k := 0
-		for k in open.size():
-			if dist[open[k]] < dist[open[best_k]]:
-				best_k = k
-		var cur: int = open.pop_at(best_k)
-		if cur == to:
-			break
-		if done.has(cur):
-			continue
-		done[cur] = true
-		for n in links[cur]:
-			var next: int = n
-			var cost := dist[cur] + (positions[cur] as Vector3).distance_to(positions[next])
-			if cost < dist[next]:
-				dist[next] = cost
-				prev[next] = cur
-				open.append(next)
-	var result: Array[int] = []
-	if from != to and prev[to] == -1:
-		return result
-	var at := to
-	while at != -1:
-		result.push_front(at)
-		at = prev[at]
-	return result
+	return NavPath.find_path(graph, from, to)
 
 
 func _move(delta: float) -> void:
@@ -299,7 +255,7 @@ func calm() -> void:
 	for child in get_children():
 		if child is CollisionShape3D:
 			var shape := CylinderShape3D.new()
-			shape.radius = 0.08
-			shape.height = 0.32
+			shape.radius = 0.1
+			shape.height = 0.4
 			child.shape = shape
-			child.position = Vector3(0, 0.045, 0)
+			child.position = Vector3(0, 0.085, 0)

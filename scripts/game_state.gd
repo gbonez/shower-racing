@@ -26,10 +26,25 @@ const TEMPLATES := {
 	"boiler_room": "Boiler room",
 	"giant_house": "Giant house",
 	"bathroom": "Bathroom only",
+	"chase": "The chase",
+	"warehouse": "Warehouse",
+	"lab": "The lab",
+	"power_outage": "Power outage",
+	"monster_movie": "Monster movie",
+	"doghouse": "The doghouse",
+	"golf": "Golf course",
+	"lake": "The lake",
+	"treasure_hunt": "Treasure hunt",
 }
+# Templates with no house or bathroom around the shower: the open-air and hall maps.
+const OPEN_TEMPLATES: Array[String] = ["cloud_walk", "beach", "warehouse", "lab", "monster_movie", "golf", "lake", "treasure_hunt"]
 const STORY_SEED := "SINGLEPLAYER"
 const DEFAULT_RULES := {"run_bottles": false, "run_shower": false, "need_boiler": false,
-		"item_freq": "regular", "keys": 0, "no_fake_keys": false}
+		"item_freq": "regular", "keys": 0, "no_fake_keys": false, "always_chase": false, "abnormal_parts": false}
+# The rules shown as check boxes in free play and the multiplayer lobby: [key, label].
+const RULE_TOGGLES: Array = [["run_bottles", "Always run-away bottles"], ["run_shower", "Always run-away shower"],
+		["need_boiler", "Always need the boiler"], ["no_fake_keys", "Disable fake keys"],
+		["always_chase", "Always evil Forrest"], ["abnormal_parts", "Abnormal body parts"]]
 
 # Free play options, the same ones the multiplayer lobby offers.
 static var rules: Dictionary = DEFAULT_RULES.duplicate()

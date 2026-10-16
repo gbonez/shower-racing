@@ -18,6 +18,8 @@ var flipped := false  # walking on the ceiling: gravity and the view are turned 
 var roll := 0.0
 var noclip := false  # debug fly mode: no gravity, no collision
 var jump_mult := 1.0
+var swim_level := NAN  # set on maps with deep water: below it the player floats and swims
+var stunned := false  # slipped or bitten: can't move or jump for a moment
 
 func _ready() -> void:
 	floor_snap_length = 0.3
@@ -70,20 +72,23 @@ func _physics_process(delta: float) -> void:
 		return
 
 	var dir := Vector3.ZERO
-	if not frozen:
+	if not frozen and not stunned:
 		var forward := float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S))
 		var strafe := float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A))
 		dir = transform.basis * Vector3(strafe, 0, -forward)
 		dir.y = 0.0
 		dir = dir.normalized()
-	var speed := SPEED * speed_mult
+	var swimming := not is_nan(swim_level) and global_position.y - 0.9 < swim_level - 0.2
+	var speed := SPEED * speed_mult * (0.7 if swimming else 1.0)
 	velocity.x = dir.x * speed
 	velocity.z = dir.z * speed
-	if is_on_floor():
+	if swimming:
+		velocity.y = clampf((swim_level - 1.2 - (global_position.y - 0.9)) * 4.0, -3.0, 3.0)
+	elif is_on_floor():
 		velocity.y = 0.0
 	else:
 		velocity.y += (GRAVITY if flipped else -GRAVITY) * delta
-	if can_jump and not frozen and is_on_floor() and Input.is_physical_key_pressed(KEY_SPACE):
+	if can_jump and not frozen and not stunned and is_on_floor() and Input.is_physical_key_pressed(KEY_SPACE):
 		velocity.y = (-JUMP_SPEED if flipped else JUMP_SPEED) * jump_mult
 	move_and_slide()
 	_update_target()

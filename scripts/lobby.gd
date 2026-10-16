@@ -7,12 +7,18 @@ const SudsBackground := preload("res://scripts/suds_background.gd")
 var code_label: Label
 var count_label: Label
 var players_box: VBoxContainer
+var chat_box: ChatBox
 var status_label: Label
+var bans_window: Control
+var bans_list: VBoxContainer
+var bans_button: Button
 var checks: Dictionary = {}  # template key -> CheckBox
 var enable_all_button: Button
 var disable_all_button: Button
 var seeds_input: LineEdit
 var races_spin: SpinBox
+var order_picker: OptionButton
+var order_keys: Array = []
 var timer_picker: OptionButton
 var timer_keys: Array = []
 var rule_checks: Dictionary = {}  # setting key -> CheckBox
@@ -64,7 +70,16 @@ func _build() -> void:
 	body.add_child(left)
 	var left_box := VBoxContainer.new()
 	left.add_child(left_box)
-	left_box.add_child(Ui.ink_label("Players", 26))
+	var players_header := HBoxContainer.new()
+	left_box.add_child(players_header)
+	var players_title := Ui.ink_label("Players", 26)
+	players_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	players_header.add_child(players_title)
+	bans_button = Button.new()
+	bans_button.text = "Banned players"
+	Ui.style_button(bans_button, 18)
+	bans_button.pressed.connect(_open_bans)
+	players_header.add_child(bans_button)
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -72,6 +87,10 @@ func _build() -> void:
 	players_box = VBoxContainer.new()
 	players_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(players_box)
+	chat_box = ChatBox.new()
+	chat_box.custom_minimum_size = Vector2(0, 220)
+	chat_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_box.add_child(chat_box)
 
 	var right := Ui.panel()
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -136,6 +155,17 @@ func _build() -> void:
 	races_row.add_child(races_spin)
 	settings.add_child(races_row)
 
+	var order_row := HBoxContainer.new()
+	order_row.add_child(Ui.ink_label("Map order  ", 22))
+	order_picker = OptionButton.new()
+	for key in MP.ORDER_MODES:
+		order_keys.append(key)
+		order_picker.add_item(MP.ORDER_MODES[key])
+	Ui.style_input(order_picker, ["normal", "hover", "pressed", "focus", "disabled"], 22)
+	order_picker.item_selected.connect(_on_order_selected)
+	order_row.add_child(order_picker)
+	settings.add_child(order_row)
+
 	var timer_row := HBoxContainer.new()
 	timer_row.add_child(Ui.ink_label("Timer starts when  ", 22))
 	timer_picker = OptionButton.new()
@@ -148,9 +178,7 @@ func _build() -> void:
 	settings.add_child(timer_row)
 
 	settings.add_child(Ui.ink_label("Rules", 26))
-	var rule_list := [["run_bottles", "Always run-away bottles"], ["run_shower", "Always run-away shower"],
-			["need_boiler", "Always need the boiler"], ["no_fake_keys", "Disable fake keys"]]
-	for entry in rule_list:
+	for entry in GameState.RULE_TOGGLES:
 		var rule := CheckBox.new()
 		rule.text = entry[1]
 		Ui.style_check(rule, 22)
@@ -222,6 +250,8 @@ func _refresh() -> void:
 	seeds_input.editable = is_host
 	races_spin.set_value_no_signal(int(settings["races"]))
 	races_spin.editable = is_host
+	order_picker.select(maxi(order_keys.find(str(settings.get("order_mode", "random"))), 0))
+	order_picker.disabled = not is_host
 	timer_picker.select(maxi(timer_keys.find(str(settings["timer_start"])), 0))
 	timer_picker.disabled = not is_host
 	for key in rule_checks:
@@ -238,15 +268,37 @@ func _refresh() -> void:
 	ready_button.text = "Not Ready" if MP.me_ready() else "Ready"
 	ready_button.disabled = phase != "lobby"
 	start_button.visible = is_host
-	start_button.disabled = phase != "lobby" or not MP.all_ready() or settings["templates"].is_empty()
+	bans_button.visible = is_host
+	if not is_host:
+		_close_bans()
 	status_label.text = _status_text(phase, is_host)
+	_update_start_button(phase, settings)
+
+
+func _process(_delta: float) -> void:
+	if start_button != null and MP.phase() == "starting":
+		_update_start_button("starting", MP.settings())
+		status_label.text = _status_text("starting", Net.is_host)
+
+
+# The host's button starts the race (forcing it if some players aren't ready), and cancels the countdown.
+func _update_start_button(phase: String, settings: Dictionary) -> void:
+	if phase == "starting":
+		start_button.text = "Cancel Start"
+		start_button.disabled = false
+		return
+	var waiting := MP.not_ready_count()
+	start_button.text = "Start Race" if waiting == 0 else "Force Start"
+	start_button.disabled = phase != "lobby" or settings["templates"].is_empty()
 
 
 func _status_text(phase: String, is_host: bool) -> String:
 	match phase:
+		"starting":
+			return "The race starts in %d..." % ceili(MP.countdown) + ("  (host: press Cancel Start to stop it)" if is_host else "")
 		"racing", "between":
 			return "A race is in progress. You'll join the next race."
-		"final":
+		"final_scores", "final":
 			return "Waiting for the host to bring everyone back to the lobby."
 	if is_host:
 		if MP.settings()["templates"].is_empty():
@@ -270,14 +322,18 @@ func _rebuild_players(phase: String) -> void:
 			label_text += "  (host)"
 		if id == Net.my_id:
 			label_text += "  (you)"
+		if Net.muted.has(id):
+			label_text += "  [muted]"
+		var entry := VBoxContainer.new()
 		var row := HBoxContainer.new()
+		entry.add_child(row)
 		var name_label := Ui.ink_label(label_text, 22)
 		name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(name_label)
 		var tag := ""
 		if bool(p["late"]):
 			tag = "joins next race"
-		elif id != Net.host_id and phase == "lobby":
+		elif id != Net.host_id and phase in ["lobby", "starting"]:
 			tag = "READY" if bool(p["ready"]) else "not ready"
 		if int(p["points"]) > 0 or phase != "lobby":
 			tag = ("%d pts   " % int(p["points"])) + tag
@@ -285,7 +341,94 @@ func _rebuild_players(phase: String) -> void:
 		if bool(p["ready"]) and not bool(p["late"]):
 			tag_label.add_theme_color_override("font_color", Color(0.15, 0.55, 0.3))
 		row.add_child(tag_label)
-		players_box.add_child(row)
+		if Net.is_host and id != Net.my_id:
+			var tools := HBoxContainer.new()
+			tools.add_theme_constant_override("separation", 6)
+			entry.add_child(tools)
+			_tool_button(tools, "Unmute" if Net.muted.has(id) else "Mute", "unmute" if Net.muted.has(id) else "mute", id)
+			_tool_button(tools, "Kick", "kick", id)
+			_tool_button(tools, "Ban", "ban", id)
+			_tool_button(tools, "Make host", "promote", id)
+		players_box.add_child(entry)
+		players_box.add_child(HSeparator.new())
+
+
+func _tool_button(parent: Control, text: String, action: String, id: int) -> void:
+	var b := Button.new()
+	b.text = text
+	Ui.style_button(b, 16)
+	b.pressed.connect(func(): Net.admin(action, id))
+	parent.add_child(b)
+
+
+# --- Banned players (host only) ---
+
+func _open_bans() -> void:
+	if not Net.is_host or bans_window != null:
+		return
+	bans_window = Control.new()
+	add_child(bans_window)
+	bans_window.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var shade := ColorRect.new()
+	shade.color = Color(0, 0.05, 0.15, 0.55)
+	bans_window.add_child(shade)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var center := CenterContainer.new()
+	bans_window.add_child(center)
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var panel := Ui.panel()
+	panel.custom_minimum_size = Vector2(460, 0)
+	center.add_child(panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 8)
+	panel.add_child(column)
+	column.add_child(Ui.ink_label("Banned players", 30))
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 260)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	column.add_child(scroll)
+	bans_list = VBoxContainer.new()
+	bans_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(bans_list)
+	var close := Button.new()
+	close.text = "Close"
+	Ui.style_button(close, 22)
+	close.pressed.connect(_close_bans)
+	column.add_child(close)
+	Net.bans_changed.connect(_fill_bans)
+	_fill_bans([])
+	Net.admin("bans")
+
+
+func _close_bans() -> void:
+	if bans_window == null:
+		return
+	if Net.bans_changed.is_connected(_fill_bans):
+		Net.bans_changed.disconnect(_fill_bans)
+	bans_window.queue_free()
+	bans_window = null
+	bans_list = null
+
+
+func _fill_bans(names: Array) -> void:
+	if bans_list == null:
+		return
+	for child in bans_list.get_children():
+		bans_list.remove_child(child)
+		child.queue_free()
+	if names.is_empty():
+		bans_list.add_child(Ui.ink_label("Nobody is banned from this room.", 20))
+	for banned in names:
+		var row := HBoxContainer.new()
+		var label := Ui.ink_label(str(banned), 22)
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(label)
+		var unban := Button.new()
+		unban.text = "Unban"
+		Ui.style_button(unban, 18)
+		unban.pressed.connect(func(): Net.admin("unban", str(banned)))
+		row.add_child(unban)
+		bans_list.add_child(row)
 
 
 func _on_template_toggled(_pressed: bool, _key: String) -> void:
@@ -314,6 +457,11 @@ func _on_races_changed(value: float) -> void:
 		MP.update_settings({"races": int(value)})
 
 
+func _on_order_selected(index: int) -> void:
+	if not syncing and Net.is_host:
+		MP.update_settings({"order_mode": order_keys[index]})
+
+
 func _on_timer_selected(index: int) -> void:
 	if not syncing and Net.is_host:
 		MP.update_settings({"timer_start": timer_keys[index]})
@@ -339,7 +487,10 @@ func _on_ready_pressed() -> void:
 
 
 func _on_start_pressed() -> void:
-	MP.start_race_set()
+	if MP.phase() == "starting":
+		MP.cancel_start()
+	else:
+		MP.start_race_set()
 
 
 func _on_leave_pressed() -> void:

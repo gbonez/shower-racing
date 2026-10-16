@@ -8,11 +8,13 @@ var skin_color := Color(0.93, 0.8, 0.7)
 
 var product_color := Color.WHITE
 var title := ""
-var stages: Array = []  # each: {"name": String, "size": Vector2}
+var stages: Array = []  # each: {"name": String, "size": Vector2, "shape": PackedVector2Array (optional)}
 var stage := 0
 var cell_cols := 0
 var cell_rows := 0
 var painted := PackedByteArray()
+var active := PackedByteArray()  # 1 for the cells that belong to the stage's shape
+var shape := PackedVector2Array()  # outline of an odd-shaped part, empty for a plain rectangle
 var covered := 0
 var total_cells := 0
 var painting := false
@@ -33,9 +35,23 @@ func _start_stage(index: int) -> void:
 	var stage_size: Vector2 = stages[index]["size"]
 	cell_cols = int(stage_size.x / CELL)
 	cell_rows = int(stage_size.y / CELL)
-	total_cells = cell_cols * cell_rows
+	shape = stages[index].get("shape", PackedVector2Array())
 	painted = PackedByteArray()
-	painted.resize(total_cells)
+	painted.resize(cell_cols * cell_rows)
+	active = PackedByteArray()
+	active.resize(cell_cols * cell_rows)
+	total_cells = 0
+	for cy in cell_rows:
+		for cx in cell_cols:
+			var inside := shape.is_empty() \
+					or Geometry2D.is_point_in_polygon(Vector2((cx + 0.5) * CELL, (cy + 0.5) * CELL), shape)
+			if inside:
+				active[cy * cell_cols + cx] = 1
+				total_cells += 1
+	if total_cells == 0:  # a shape too thin to hold a single cell: fall back to the whole box
+		shape = PackedVector2Array()
+		active.fill(1)
+		total_cells = cell_cols * cell_rows
 	covered = 0
 	painting = false
 	queue_redraw()
@@ -91,7 +107,7 @@ func _paint_at(p: Vector2) -> void:
 			if center.distance_squared_to(local) > brush_radius * brush_radius:
 				continue
 			var idx := cy * cell_cols + cx
-			if painted[idx] == 0:
+			if painted[idx] == 0 and active[idx] == 1:
 				painted[idx] = 1
 				covered += 1
 	queue_redraw()
@@ -111,12 +127,25 @@ func _finish_stage() -> void:
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0, 0, 0, 0.8))
 	var r := _current_rect()
-	draw_rect(r, skin_color)
+	if shape.is_empty():
+		draw_rect(r, skin_color)
+	else:
+		var outline := PackedVector2Array()
+		for point in shape:
+			outline.append(r.position + point)
+		draw_colored_polygon(outline, skin_color)
 	for cy in cell_rows:
 		for cx in cell_cols:
 			if painted[cy * cell_cols + cx] == 1:
 				draw_rect(Rect2(r.position + Vector2(cx, cy) * CELL, Vector2(CELL, CELL)), product_color)
-	draw_rect(r, Color.WHITE, false, 3.0)
+	if shape.is_empty():
+		draw_rect(r, Color.WHITE, false, 3.0)
+	else:
+		var closed := PackedVector2Array()
+		for point in shape:
+			closed.append(r.position + point)
+		closed.append(r.position + shape[0])
+		draw_polyline(closed, Color.WHITE, 3.0)
 
 	var font := Ui.font()
 	draw_string_outline(font, Vector2(0, r.position.y - 64), title, HORIZONTAL_ALIGNMENT_CENTER, size.x, 30, 8, Ui.NAVY)

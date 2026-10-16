@@ -8,10 +8,14 @@ const PINK := Color(1.0, 0.78, 0.88)
 const MINT := Color(0.75, 1.0, 0.85)
 const LAVENDER := Color(0.85, 0.8, 1.0)
 const YELLOW := Color(1.0, 0.95, 0.7)
+const FREE_TOGGLES_PER_PAGE := 3
 
 var title: Label
 var page: VBoxContainer
 var free_index := 0
+var free_option_page := 0
+var free_options_box: VBoxContainer
+var free_page_label: Label
 var free_seed_input: LineEdit
 var name_input: LineEdit
 var server_input: LineEdit
@@ -144,19 +148,70 @@ func _show_free() -> void:
 	buttons.add_child(Ui.bubble("Back", LAVENDER, _show_single, Vector2(260, 68)))
 
 
-# The timer and rule options from the multiplayer lobby, kept in GameState for the next level.
+# The timer and rule options from the multiplayer lobby, kept in GameState for the next level. They are
+# split into pages so the Generate / Back buttons always stay on screen.
 func _add_free_options() -> void:
 	var panel := Ui.panel()
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(560, 210)
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	panel.add_child(scroll)
 	page.add_child(panel)
-	var options := VBoxContainer.new()
-	options.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	options.add_theme_constant_override("separation", 6)
-	scroll.add_child(options)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 6)
+	panel.add_child(column)
+	free_options_box = VBoxContainer.new()
+	free_options_box.custom_minimum_size = Vector2(560, 150)
+	free_options_box.add_theme_constant_override("separation", 6)
+	column.add_child(free_options_box)
 
+	var nav := HBoxContainer.new()
+	nav.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav.add_theme_constant_override("separation", 14)
+	column.add_child(nav)
+	var previous := Button.new()
+	previous.text = "< Prev"
+	Ui.style_button(previous, 20)
+	previous.pressed.connect(_set_free_page.bind(-1))
+	nav.add_child(previous)
+	free_page_label = Ui.ink_label("", 20)
+	free_page_label.custom_minimum_size = Vector2(110, 0)
+	free_page_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	nav.add_child(free_page_label)
+	var next := Button.new()
+	next.text = "Next >"
+	Ui.style_button(next, 20)
+	next.pressed.connect(_set_free_page.bind(1))
+	nav.add_child(next)
+	_fill_free_page()
+
+
+func _free_page_count() -> int:
+	return 1 + ceili(GameState.RULE_TOGGLES.size() / float(FREE_TOGGLES_PER_PAGE))
+
+
+func _set_free_page(step: int) -> void:
+	free_option_page = (free_option_page + step + _free_page_count()) % _free_page_count()
+	_fill_free_page()
+
+
+func _fill_free_page() -> void:
+	for child in free_options_box.get_children():
+		free_options_box.remove_child(child)
+		child.queue_free()
+	free_page_label.text = "Page %d / %d" % [free_option_page + 1, _free_page_count()]
+	if free_option_page == 0:
+		_fill_basic_options(free_options_box)
+		return
+	free_options_box.add_child(Ui.ink_label("Rules", 26))
+	var first := (free_option_page - 1) * FREE_TOGGLES_PER_PAGE
+	for i in range(first, mini(first + FREE_TOGGLES_PER_PAGE, GameState.RULE_TOGGLES.size())):
+		var entry: Array = GameState.RULE_TOGGLES[i]
+		var rule := CheckBox.new()
+		rule.text = entry[1]
+		Ui.style_check(rule, 22)
+		rule.button_pressed = bool(GameState.rules[entry[0]])
+		rule.toggled.connect(func(on: bool): GameState.rules[entry[0]] = on)
+		free_options_box.add_child(rule)
+
+
+func _fill_basic_options(options: VBoxContainer) -> void:
 	var timer_row := HBoxContainer.new()
 	timer_row.add_child(Ui.ink_label("Timer starts when  ", 22))
 	var timer_picker := OptionButton.new()
@@ -168,17 +223,6 @@ func _add_free_options() -> void:
 	timer_picker.item_selected.connect(func(index: int): GameState.free_timer = str(timer_keys[index]))
 	timer_row.add_child(timer_picker)
 	options.add_child(timer_row)
-
-	options.add_child(Ui.ink_label("Rules", 26))
-	var rule_list := [["run_bottles", "Always run-away bottles"], ["run_shower", "Always run-away shower"],
-			["need_boiler", "Always need the boiler"], ["no_fake_keys", "Disable fake keys"]]
-	for entry in rule_list:
-		var rule := CheckBox.new()
-		rule.text = entry[1]
-		Ui.style_check(rule, 22)
-		rule.button_pressed = bool(GameState.rules[entry[0]])
-		rule.toggled.connect(func(on: bool): GameState.rules[entry[0]] = on)
-		options.add_child(rule)
 
 	var freq_keys := ["none", "low", "regular", "crazy"]
 	var freq_row := HBoxContainer.new()

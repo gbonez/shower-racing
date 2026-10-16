@@ -1,7 +1,8 @@
 class_name Items
 extends RefCounted
 
-# Small pickups built from primitives: energy drink, scrub brush, keys, spring shoes and the beach bucket.
+# Small pickups built from primitives: energy drink, scrub brush, loofa, keys, spring shoes, bottle radar,
+# crowns, the beach bucket, the doghouse bone and the multiplayer household items.
 
 const KEY_COLOR := Color(0.85, 0.65, 0.2)
 
@@ -38,16 +39,24 @@ static func _cyl(top: float, bottom: float, height: float) -> CylinderMesh:
 	return m
 
 
-# `rest` is how far the item's origin sits above the surface it lies on.
+# `rest` is how far the item's origin sits above the surface it lies on. Items sit on physics layer 2:
+# the player walks straight through them, but clicks (ray casts) still hit them. Hitboxes are 25% bigger
+# than the models so they are easier to aim at.
+const HIT_SCALE := 1.25
+const ITEM_LAYER := 2
+
+
 static func _body(item: String, label: String, rest: float, hit_size: Vector3) -> StaticBody3D:
 	var body := StaticBody3D.new()
+	body.collision_layer = ITEM_LAYER
+	body.collision_mask = 0
 	body.set_meta("kind", "item")
 	body.set_meta("item", item)
 	body.set_meta("label", label)
 	body.set_meta("rest", rest)
 	var cs := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = hit_size
+	shape.size = hit_size * HIT_SCALE
 	cs.shape = shape
 	body.add_child(cs)
 	return body
@@ -105,8 +114,8 @@ static func golden_key() -> StaticBody3D:
 	gem.height = 0.04
 	var gem_mi := _part(body, gem, Vector3(-0.12, 0.015, 0), Color(0.85, 0.1, 0.2))
 	for mi in parts:
-		mi.material_override = _glow(gold, 0.5)
-	gem_mi.material_override = _glow(Color(0.85, 0.1, 0.2), 0.8)
+		mi.material_override = _mat(gold.darkened(0.2))
+	gem_mi.material_override = _mat(Color(0.6, 0.08, 0.14))
 	return body
 
 
@@ -126,6 +135,149 @@ static func crown() -> StaticBody3D:
 		var colors: Array[Color] = [Color(0.85, 0.1, 0.2), Color(0.15, 0.3, 0.95), Color(0.1, 0.75, 0.3)]
 		var jewel_mi := _part(body, jewel, Vector3(cos(a) * 0.17, 0.0, sin(a) * 0.17), colors[i % 3])
 		jewel_mi.material_override = _glow(colors[i % 3], 0.8)
+	return body
+
+
+# The crypt crown: the king's crown's ghostly twin, found only on the sarcophagus in the crypt's tomb.
+# Same bonus: scrub brush +100% and movement +50% for good.
+static func crypt_crown() -> StaticBody3D:
+	var bone := Color(0.85, 0.9, 0.82)
+	var green := Color(0.3, 1.0, 0.55)
+	var body := _body("crypt_crown", "Crypt crown", 0.1, Vector3(0.36, 0.28, 0.36))
+	var band := _part(body, _cyl(0.17, 0.15, 0.1), Vector3.ZERO, bone)
+	band.material_override = _glow(bone, 0.3)
+	for i in 5:
+		var a := i * TAU / 5.0
+		var spike := _part(body, _cyl(0.0, 0.03, 0.15), Vector3(cos(a) * 0.16, 0.12, sin(a) * 0.16), bone)
+		spike.material_override = _glow(bone, 0.3)
+		var eye := SphereMesh.new()
+		eye.radius = 0.02
+		eye.height = 0.04
+		var eye_mi := _part(body, eye, Vector3(cos(a) * 0.17, 0.0, sin(a) * 0.17), green)
+		eye_mi.material_override = _glow(green, 1.4)
+	var gem := SphereMesh.new()
+	gem.radius = 0.035
+	gem.height = 0.07
+	var gem_mi := _part(body, gem, Vector3(0, 0.1, 0.17), green)
+	gem_mi.material_override = _glow(green, 2.0)
+	return body
+
+
+# A rare, extra-scratchy scrub: soap strokes +50% for good.
+static func loofa() -> StaticBody3D:
+	var body := _body("loofa", "Loofa", 0.05, Vector3(0.32, 0.1, 0.12))
+	_part(body, _cyl(0.045, 0.045, 0.28), Vector3.ZERO, Color(0.85, 0.78, 0.45), Vector3(0, 0, 90))
+	for i in 5:
+		_part(body, _cyl(0.049, 0.049, 0.02), Vector3(-0.11 + i * 0.055, 0, 0), Color(0.62, 0.55, 0.3), Vector3(0, 0, 90))
+	var strap := TorusMesh.new()
+	strap.inner_radius = 0.03
+	strap.outer_radius = 0.038
+	_part(body, strap, Vector3(0.15, 0.03, 0), Color(0.3, 0.7, 0.4), Vector3(0, 90, 0))
+	return body
+
+
+# Shows every bottle through the walls until it is picked up.
+static func bottle_radar() -> StaticBody3D:
+	var body := _body("radar", "Bottle radar", 0.06, Vector3(0.18, 0.14, 0.18))
+	_part(body, _box(Vector3(0.16, 0.04, 0.16)), Vector3(0, -0.04, 0), Color(0.12, 0.13, 0.16))
+	var screen := _part(body, _cyl(0.07, 0.07, 0.012), Vector3(0, -0.012, 0), Color(0.1, 0.9, 0.4))
+	screen.material_override = _glow(Color(0.1, 0.9, 0.4), 0.9)
+	for blip in [Vector3(0.025, 0.0, 0.02), Vector3(-0.03, 0.0, -0.025), Vector3(0.0, 0.0, -0.045)]:
+		var dot := SphereMesh.new()
+		dot.radius = 0.008
+		dot.height = 0.016
+		var dot_mi := _part(body, dot, blip + Vector3(0, 0.0, 0), Color.WHITE)
+		dot_mi.material_override = _glow(Color(0.8, 1.0, 0.85), 2.5)
+	_part(body, _cyl(0.004, 0.004, 0.14), Vector3(0.06, 0.04, -0.06), Color(0.7, 0.72, 0.75))
+	return body
+
+
+# --- Multiplayer items: household things that help or hinder the other racers ---
+
+static func banana_peel() -> StaticBody3D:
+	var body := _body("banana", "Banana peel", 0.03, Vector3(0.28, 0.08, 0.2))
+	var yellow := Color(0.98, 0.85, 0.15)
+	_part(body, _box(Vector3(0.12, 0.025, 0.06)), Vector3.ZERO, yellow)
+	for side in [-1.0, 1.0]:
+		_part(body, _box(Vector3(0.1, 0.02, 0.05)), Vector3(side * 0.095, 0.015, 0.0), yellow, Vector3(0, 0, -side * 25.0))
+		_part(body, _box(Vector3(0.07, 0.015, 0.05)), Vector3(side * 0.04, 0.0, side * 0.06), yellow.darkened(0.1), Vector3(0, side * 40.0, 0))
+	_part(body, _box(Vector3(0.025, 0.025, 0.04)), Vector3(0.15, 0.03, 0), Color(0.35, 0.22, 0.1))
+	return body
+
+
+static func bath_bomb() -> StaticBody3D:
+	var body := _body("bathbomb", "Bubble bath bomb", 0.05, Vector3(0.14, 0.14, 0.14))
+	var ball := SphereMesh.new()
+	ball.radius = 0.055
+	ball.height = 0.11
+	_part(body, ball, Vector3.ZERO, Color(0.95, 0.5, 0.8))
+	var band := TorusMesh.new()
+	band.inner_radius = 0.052
+	band.outer_radius = 0.06
+	_part(body, band, Vector3.ZERO, Color(1.0, 0.9, 0.95))
+	for k in 5:
+		var a := k * TAU / 5.0
+		var spark := SphereMesh.new()
+		spark.radius = 0.006
+		spark.height = 0.012
+		var mi := _part(body, spark, Vector3(cos(a) * 0.04, 0.03 + 0.012 * k, sin(a) * 0.04), Color.WHITE)
+		mi.material_override = _glow(Color(1, 1, 1), 2.0)
+	return body
+
+
+static func ice_tray() -> StaticBody3D:
+	var body := _body("icecubes", "Ice cube tray", 0.03, Vector3(0.3, 0.08, 0.2))
+	_part(body, _box(Vector3(0.26, 0.025, 0.18)), Vector3(0, -0.01, 0), Color(0.55, 0.6, 0.7))
+	for gx in 3:
+		for gz in 2:
+			_part(body, _box(Vector3(0.065, 0.05, 0.065)), Vector3(-0.08 + gx * 0.08, 0.025, -0.04 + gz * 0.08), Color(0.75, 0.92, 1.0, 0.75))
+	return body
+
+
+static func box_fan() -> StaticBody3D:
+	var body := _body("fan", "Box fan", 0.14, Vector3(0.34, 0.34, 0.16))
+	var grey := Color(0.7, 0.72, 0.75)
+	_part(body, _box(Vector3(0.3, 0.02, 0.1)), Vector3(0, 0.15, 0), grey)
+	_part(body, _box(Vector3(0.3, 0.02, 0.1)), Vector3(0, -0.15, 0), grey)
+	_part(body, _box(Vector3(0.02, 0.3, 0.1)), Vector3(0.15, 0, 0), grey)
+	_part(body, _box(Vector3(0.02, 0.3, 0.1)), Vector3(-0.15, 0, 0), grey)
+	for k in 3:
+		_part(body, _box(Vector3(0.24, 0.05, 0.01)), Vector3.ZERO, Color(0.35, 0.55, 0.85), Vector3(0, 0, k * 60.0))
+	_part(body, _cyl(0.035, 0.035, 0.06), Vector3.ZERO, Color(0.25, 0.25, 0.3), Vector3(90, 0, 0))
+	return body
+
+
+static func warm_towel() -> StaticBody3D:
+	var body := _body("towel", "Warm towel", 0.05, Vector3(0.3, 0.1, 0.22))
+	var colors: Array[Color] = [Color(0.95, 0.55, 0.6), Color(0.98, 0.95, 0.9), Color(0.95, 0.55, 0.6)]
+	for i in 3:
+		_part(body, _box(Vector3(0.26 - i * 0.02, 0.03, 0.2)), Vector3(0, -0.04 + i * 0.032, 0), colors[i], Vector3(0, i * 6.0, 0))
+	return body
+
+
+# The doghouse's guard dog can be distracted with this.
+static func bone() -> StaticBody3D:
+	var body := _body("bone", "Bone", 0.03, Vector3(0.3, 0.08, 0.12))
+	var white := Color(0.96, 0.94, 0.86)
+	_part(body, _cyl(0.014, 0.014, 0.2), Vector3.ZERO, white, Vector3(0, 0, 90))
+	for end in [-0.1, 0.1]:
+		for z in [-0.016, 0.016]:
+			var knob := SphereMesh.new()
+			knob.radius = 0.022
+			knob.height = 0.044
+			_part(body, knob, Vector3(end, 0, z), white)
+	return body
+
+
+static func chest() -> StaticBody3D:
+	var body := _body("chest", "Treasure chest", 0.15, Vector3(0.6, 0.4, 0.4))
+	var wood := Color(0.5, 0.3, 0.14)
+	var gold := Color(0.95, 0.75, 0.2)
+	_part(body, _box(Vector3(0.5, 0.22, 0.32)), Vector3(0, -0.05, 0), wood)
+	_part(body, _cyl(0.16, 0.16, 0.5), Vector3(0, 0.1, 0), wood.lightened(0.08), Vector3(0, 0, 90))
+	for x in [-0.2, 0.2]:
+		_part(body, _box(Vector3(0.04, 0.3, 0.34)), Vector3(x, 0.02, 0), gold)
+	_part(body, _box(Vector3(0.06, 0.08, 0.04)), Vector3(0, 0.0, 0.17), gold)
 	return body
 
 

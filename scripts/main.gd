@@ -38,7 +38,6 @@ const HELD_POS := Vector3(0.25, -0.25, -0.5)
 const HELD_ROT := Vector3(-10, 25, 8)
 const HELD_SCALE := 1.3
 const SHOWER_SPAWN_CHANCE := 0.7  # for a bathroom bottle: shower vs elsewhere in the bathroom
-const HOUSE_SPAWN_CHANCE := 0.5  # for a free bottle: elsewhere in the house vs in the bathroom
 const WALL_INSET := 0.03  # keeps wall-mounted shower parts off the tile overlay
 const FLASH_POS := Vector3(-0.3, -0.27, -0.55)
 const FLASHLIGHT_CHANCE := 0.5  # templates without a basement; basement and maze always get one
@@ -55,13 +54,38 @@ const BRUSH_BONUS := 0.33
 const BOILER_SECONDS := 60.0  # of running hot water per boiler start
 const GIANT_SCALE := 4.0
 const TANK_FILLS := 3
-const PORTAL_MAX_HOPS := 3  # how many times the run-away bathroom door relocates in total
-const PORTAL_COUNT := 8
+const PORTAL_MAX_HOPS := 6  # how many times the run-away bathroom door relocates in total
+const PORTAL_MIN := 6  # door slots on house walls, at least this many ...
+const PORTAL_MAX := 10  # ... and up to this many
 const DARK_TELEPORT_SECONDS := 5.0
 const CLOUD_JUMP := 2.2360679  # sqrt(5): five times the normal jump height
 const ITEM_MULT := {"none": 0.0, "low": 0.4, "regular": 1.0, "crazy": 4.0}
-const RULE_DEFAULTS := {"run_bottles": false, "run_shower": false, "need_boiler": false,
-		"item_freq": "regular", "keys": 0, "no_fake_keys": false}
+const RULE_DEFAULTS := GameState.DEFAULT_RULES
+const LOOFA_BONUS := 0.5
+const LOOFA_CHANCE := 0.05  # per bedroom, bathroom or closet: a rare find
+const RADAR_CHANCE := 0.08  # per room; the scary maze's basement always has one
+const MP_ITEM_CHANCE := 0.3  # per suitable room, multiplayer only
+const MP_ITEM_MINIMUM := 2  # multiplayer levels always have at least this many
+const SLIP_SECONDS := 3.0
+const SUDS_SECONDS := 6.0
+const CHILL_SECONDS := 8.0
+const CHILL_MULT := 0.65
+const TAILWIND_SECONDS := 10.0
+const TAILWIND_MULT := 1.3
+const COZY_SECONDS := 10.0
+const COZY_MULT := 1.4
+const BATHROOM_BOTTLE_CHANCE := 0.5  # the one bottle that may start in the bathroom
+const CHASE_LIVES := 3  # the evil Forrest gets you this many times and you lose
+const MAP_SCRIPTS := {
+	"warehouse": "res://scripts/hall_maps.gd",
+	"lab": "res://scripts/hall_maps.gd",
+	"monster_movie": "res://scripts/outdoor_maps.gd",
+	"golf": "res://scripts/outdoor_maps.gd",
+	"lake": "res://scripts/outdoor_maps.gd",
+	"treasure_hunt": "res://scripts/treasure_hunt.gd",
+}
+const ChaserScript := preload("res://scripts/chaser.gd")
+const DogScript := preload("res://scripts/dog.gd")
 const SudsBackground := preload("res://scripts/suds_background.gd")
 const FORCE_TEMPLATE := ""  # set to a GameState.TEMPLATES key to skip the random pick
 const FORCE_SEED := 0  # set to a non-zero number to replay a layout; 0 picks a new seed each launch
@@ -103,6 +127,22 @@ var timer_started := false
 var mp_race := 0
 var mp_spectating := false
 var mp_panel: MpPanel
+var chat_box: ChatBox
+var chat_typing := false
+var sun: DirectionalLight3D
+var radar_on := false  # the bottle radar: uncollected bottles glow through walls
+var slip_time := 0.0  # seconds left frozen after a banana peel
+var suds_time := 0.0  # seconds left with the view covered in suds
+var suds_overlay: ColorRect
+var speed_fx: Array[Dictionary] = []  # speed changes from other racers' items: {mult, time}
+var chaser: Node3D  # the evil Forrest
+var dog: Node3D  # the doghouse's guard dog
+var catches := 0
+var chase_on := false
+var lost := false
+var spawn_point := Vector3.ZERO
+var map_nav: Dictionary = {}
+var bottle_rooms: Array = []  # rooms that already hold a bottle
 var race_label: Label
 var blind_overlay: ColorRect
 var blind_amount := 0.0
@@ -192,15 +232,17 @@ func _ready() -> void:
 		if is_giant:
 			house.apply_giant(GIANT_SCALE)
 		if house.sealed:
-			house.build_portals(PORTAL_COUNT)
-			for i in house.portals.size():
-				_set_slot_active(i, false)
+			house.build_portals(PORTAL_MIN, PORTAL_MAX)
+			_init_portals()
 		_spawn_keys()
 	_build_bottles()
 	_build_flashlight_item()
 	_spawn_items()
 	_build_player()
 	_build_hud()
+	_build_extras()
+	if MP.active:
+		Net.message.connect(_on_net_message)
 	_update_status()
 	_say(_intro_message(), 6.0)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -218,7 +260,9 @@ func _roll_products() -> void:
 
 
 func _intro_message() -> String:
-	if needs_boiler and template != "beach" and template != "cloud_walk":
+	if template == "chase" or chase_on:
+		return "Evil Forrest is hunting you! He walks at half your speed. Three catches and you lose the race."
+	if needs_boiler and not is_open_world:
 		return "The water is cold. Find the boiler before showering!"
 	match template:
 		"beach":
@@ -231,6 +275,22 @@ func _intro_message() -> String:
 			return "The house is upside down. Walk on the ceiling!"
 		"giant_house":
 			return "Everything is huge! Only the bathroom door opens; the others you can walk under."
+		"warehouse":
+			return "Find the control panels: they swing the catwalks into place so you can reach the soap."
+		"lab":
+			return "No soap here. Mix each 3-in-1 product at the lab bench with the beaker."
+		"power_outage":
+			return "The power is out! Use your flashlight (F) to find the soap and the shower."
+		"monster_movie":
+			return "You're enormous! Jump onto the tiny buildings to crush them. Three hide soap."
+		"doghouse":
+			return "A guard dog watches the soap in the back yard. Find a bone to distract it."
+		"golf":
+			return "Sink a putt at each hole to win a bottle."
+		"lake":
+			return "Cast a line into the lake. Every catch is a bottle!"
+		"treasure_hunt":
+			return "Swim out and find the 5 chests. Carry them to shore to open them, and watch out for the shark!"
 	return "Find the shower handle and turn it to start!"
 
 
@@ -282,9 +342,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.physical_keycode:
 			KEY_F:
 				_toggle_flashlight()
-			KEY_ENTER:
-				if mp_spectating and Net.is_host:
-					MP.end_race_now()
+			KEY_ENTER, KEY_KP_ENTER, KEY_T:
+				if mp_spectating and chat_box != null:
+					_begin_chat()
 		return
 	match event.physical_keycode:
 		KEY_SLASH:
@@ -417,9 +477,11 @@ func _build_flashlight_item() -> void:
 	body.rotation.y = randf() * TAU
 	body.set_meta("kind", "flashlight")
 	body.set_meta("label", "Flashlight")
+	body.collision_layer = Items.ITEM_LAYER
+	body.collision_mask = 0
 	var cs := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(0.12, 0.12, 0.36)
+	shape.size = Vector3(0.15, 0.15, 0.45)
 	cs.shape = shape
 	body.add_child(cs)
 	add_child(body)
@@ -474,6 +536,8 @@ func _interact(target: Node) -> void:
 			_say("The boiler rumbles to life: %d seconds of hot water once the shower runs!" % int(BOILER_SECONDS), 5.0)
 		"ocean":
 			_say("Salty. You need something to carry the water in.")
+		"map_action":
+			(target.get_meta("action") as Callable).call()
 		"tank":
 			_say("The tank needs ocean water. Bring it in a bucket.")
 
@@ -488,20 +552,39 @@ func _use_held(target: Node) -> void:
 	match String(held.get_meta("item")):
 		"energy":
 			energy_time = ENERGY_SECONDS
-			player.speed_mult = crown_speed * ENERGY_BOOST
+			_apply_speed()
 			_discard_held("Glug glug! You feel fast for %d seconds." % int(ENERGY_SECONDS))
 		"brush":
 			brush_scale += BRUSH_BONUS
 			_discard_held("You scrub up. Your soap strokes are bigger for good!")
+		"loofa":
+			brush_scale += LOOFA_BONUS
+			_discard_held("A loofa! Your soap strokes are 50% bigger for good.")
+		"radar":
+			radar_on = true
+			for b in bottles:
+				_refresh_bottle(b)
+			_discard_held("Beep beep! Every bottle you haven't picked up now glows through the walls.")
 		"key":
 			_use_key(target)
 		"bucket":
 			_use_bucket(target)
-		"crown":
+		"bone":
+			_throw_bone()
+		"chest":
+			var opened: String = open_world.open_chest(held, player)
+			if opened == "":
+				_say("Carry the chest to the shore, then click to open it.")
+			else:
+				_discard_held(opened)
+		"banana", "bathbomb", "icecubes", "fan", "towel":
+			_use_mp_item(String(held.get_meta("item")))
+		"crown", "crypt_crown":
 			brush_scale += 1.0
 			crown_speed = 1.5
-			player.speed_mult = crown_speed * (ENERGY_BOOST if energy_time > 0.0 else 1.0)
-			_discard_held("You put on the king's crown! Soap strokes are 100% bigger and you move 50% faster for good.")
+			_apply_speed()
+			var crown_name := "king's" if String(held.get_meta("item")) == "crown" else "crypt"
+			_discard_held("You put on the %s crown! Soap strokes are 100%% bigger and you move 50%% faster for good." % crown_name)
 
 
 func _discard_held(message: String) -> void:
@@ -577,6 +660,7 @@ func _pick_up(body: PhysicsBody3D) -> void:
 	body.rotation_degrees = HELD_ROT
 	body.scale = Vector3.ONE * HELD_SCALE
 	held = body
+	body.set_meta("collected", true)  # the radar stops showing a bottle once it has been picked up
 	if body in runners:
 		runners.erase(body)
 		(body as RunnerBottle).calm()
@@ -594,34 +678,36 @@ func _on_right_clicked() -> void:
 	bottle.position = pos
 	bottle.rotation = Vector3.ZERO
 	bottle.scale = Vector3.ONE
-	bottle.collision_layer = 1
+	bottle.collision_layer = Items.ITEM_LAYER
 	held = null
 	_refresh_bottle(bottle)
 	_update_status()
 
 
 # Held bottles draw over the scene so they never clip into walls; the glow debug option does the same
-# for every bottle. Render priority keeps the bottle's parts in order without depth testing.
+# for every bottle, and the bottle radar for every bottle not picked up yet. Render priority keeps the
+# bottle's parts in order without depth testing.
 func _refresh_bottle(bottle: PhysicsBody3D) -> void:
 	if String(bottle.get_meta("kind")) != "bottle":
 		return
-	var xray := glow_on or bottle == held
+	var glowing: bool = glow_on or (radar_on and not bool(bottle.get_meta("collected", false)))
+	var xray: bool = glowing or bottle == held
 	var priority := 0
 	for part in bottle.get_children():
 		if part is MeshInstance3D:
-			_xray_mesh(part as MeshInstance3D, xray, priority)
+			_xray_mesh(part as MeshInstance3D, xray, priority, glowing)
 		else:
 			for child in part.get_children():
 				if child is MeshInstance3D:
-					_xray_mesh(child as MeshInstance3D, xray, priority)
+					_xray_mesh(child as MeshInstance3D, xray, priority, glowing)
 		priority += 1
 
 
-func _xray_mesh(mi: MeshInstance3D, xray: bool, priority: int) -> void:
+func _xray_mesh(mi: MeshInstance3D, xray: bool, priority: int, glowing: bool) -> void:
 	var m := mi.material_override as StandardMaterial3D
 	m.no_depth_test = xray
 	m.render_priority = priority if xray else 0
-	m.emission_enabled = glow_on
+	m.emission_enabled = glowing
 	m.emission = m.albedo_color
 	m.emission_energy_multiplier = 2.0
 
@@ -792,7 +878,11 @@ func _open_minigame(id: String) -> void:
 	game.skin_color = skin_color
 	hud.add_child(game)
 	game.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	if id != decoy_id and order.find(id) == order.size() - 1:
+	if bool(rules["abnormal_parts"]):
+		# Every phase gets its own random set of 1 to 10 odd-shaped body parts.
+		var odd_parts := _abnormal_parts()
+		game.setup(BOTTLE_COLORS[id], "Apply %s product to your body (%d odd parts)" % [id, odd_parts.size()], odd_parts)
+	elif id != decoy_id and order.find(id) == order.size() - 1:
 		var parts: Array = []
 		for part in BODY_PARTS:
 			parts.append({"name": part["name"], "size": _varied(part["size"])})
@@ -804,6 +894,63 @@ func _open_minigame(id: String) -> void:
 	game.completed.connect(_on_minigame_completed.bind(id))
 	minigame = game
 	_update_player_lock()
+
+
+# Between 1 and 10 body parts of random size, each a random shape to colour in.
+func _abnormal_parts() -> Array:
+	var names := ["Extra Elbow", "Third Knee", "Mystery Lump", "Spare Hand", "Left Wing", "Right Wing", "Tail",
+			"Second Belly Button", "Extra Shoulder", "Bonus Foot", "Fin", "Odd Patch", "Fourth Ear",
+			"Stray Toe", "Knobbly Bit", "Suspicious Flap"]
+	names.shuffle()
+	var parts: Array = []
+	for i in randi_range(1, 10):
+		var part_size := Vector2(snappedf(randf_range(70.0, 400.0), 10.0), snappedf(randf_range(70.0, 400.0), 10.0))
+		parts.append({"name": names[i % names.size()], "size": part_size, "shape": _random_shape(part_size)})
+	return parts
+
+
+# A random simple polygon that fits in a box of `box` pixels: a lumpy blob, star, triangle, trapezoid,
+# L, or hexagon.
+func _random_shape(box: Vector2) -> PackedVector2Array:
+	var pts := PackedVector2Array()
+	var centre := box / 2.0
+	match randi() % 6:
+		0:  # blob: random radii around the centre, so it can't cross itself
+			var count := randi_range(7, 13)
+			for k in count:
+				var a := TAU * k / count
+				var wobble := randf_range(0.55, 1.0)
+				pts.append(centre + Vector2(cos(a) * centre.x, sin(a) * centre.y) * wobble)
+		1:  # star
+			var arms := randi_range(4, 8)
+			for k in arms * 2:
+				var a := TAU * k / (arms * 2.0) - PI / 2.0
+				var radius := 1.0 if k % 2 == 0 else randf_range(0.35, 0.55)
+				pts.append(centre + Vector2(cos(a) * centre.x, sin(a) * centre.y) * radius)
+		2:  # triangle
+			pts.append(Vector2(randf_range(0.2, 0.8) * box.x, 0.0))
+			pts.append(Vector2(box.x, box.y))
+			pts.append(Vector2(0.0, box.y))
+		3:  # trapezoid, leaning
+			var inset := randf_range(0.1, 0.35) * box.x
+			var lean := randf_range(-0.9, 0.9) * inset
+			pts.append(Vector2(inset + lean, 0.0))
+			pts.append(Vector2(box.x - inset + lean, 0.0))
+			pts.append(Vector2(box.x, box.y))
+			pts.append(Vector2(0.0, box.y))
+		4:  # L shape
+			var notch := Vector2(randf_range(0.35, 0.6) * box.x, randf_range(0.35, 0.6) * box.y)
+			pts.append(Vector2(0.0, 0.0))
+			pts.append(Vector2(notch.x, 0.0))
+			pts.append(Vector2(notch.x, notch.y))
+			pts.append(Vector2(box.x, notch.y))
+			pts.append(Vector2(box.x, box.y))
+			pts.append(Vector2(0.0, box.y))
+		_:  # hexagon
+			for k in 6:
+				var a := TAU * k / 6.0
+				pts.append(centre + Vector2(cos(a) * centre.x, sin(a) * centre.y))
+	return pts
 
 
 func _on_minigame_completed(id: String) -> void:
@@ -889,6 +1036,8 @@ func _toggle_pause() -> void:
 		pause_layer = null
 		is_paused = false
 		_update_player_lock()
+		if mp_spectating and free_cam == null and win_layer == null:
+			_toggle_freecam()  # the race ended while the menu was open
 		return
 	is_paused = true
 	pause_layer = CanvasLayer.new()
@@ -898,11 +1047,27 @@ func _toggle_pause() -> void:
 	box.add_child(_win_label("Paused", 84, 16))
 	_win_button(box, "Continue", Color(0.75, 1.0, 0.85), _toggle_pause)
 	if MP.active:
+		if Net.is_host and MP.phase() in ["racing", "between"]:
+			if MP.phase() == "racing":
+				_win_button(box, "End Race", Color(1.0, 0.95, 0.7), _on_host_end_race)
+			_win_button(box, "End Game", Color(1.0, 0.78, 0.88), _on_host_end_game)
 		_win_button(box, "Leave Race", Color(0.85, 0.8, 1.0), _on_main_menu)
 	else:
 		_win_button(box, "Restart Level", Color(1.0, 0.95, 0.7), _on_restart_level)
 		_win_button(box, "Quit to Menu", Color(0.85, 0.8, 1.0), _on_main_menu)
 	_update_player_lock()
+
+
+# Host: stops this race for everyone still racing; scores are given to those who finished.
+func _on_host_end_race() -> void:
+	_toggle_pause()
+	MP.end_race_now()
+
+
+# Host: ends the whole game; this race is scored as it stands and the final scores follow.
+func _on_host_end_game() -> void:
+	_toggle_pause()
+	MP.end_game_now()
 
 
 func _toggle_freecam() -> void:
@@ -925,7 +1090,7 @@ func _toggle_freecam() -> void:
 
 
 func _update_freecam(delta: float) -> void:
-	if free_cam == null or is_paused:
+	if free_cam == null or is_paused or chat_typing:
 		return
 	var cam_basis := free_cam.global_transform.basis
 	var dir := Vector3.ZERO
@@ -984,7 +1149,7 @@ func _on_main_menu() -> void:
 # --- Multiplayer ---
 
 func _init_timer_mode() -> void:
-	if timer_mode == "load" or (timer_mode == "door" and template in ["bathroom", "upside_down", "cloud_walk", "beach"]):
+	if timer_mode == "load" or (timer_mode == "door" and (is_open_world or template in ["bathroom", "upside_down"])):
 		timer_started = true
 
 
@@ -994,8 +1159,10 @@ func _update_effects(delta: float) -> void:
 	if energy_time > 0.0:
 		energy_time -= dt
 		if energy_time <= 0.0:
-			player.speed_mult = crown_speed
+			_apply_speed()
 			_say("The energy drink wore off.")
+	_update_item_fx(dt)
+	_update_chase(dt)
 	if needs_boiler and water_flowing and state == State.RUNNING:
 		heat_charge = maxf(0.0, heat_charge - dt)
 		if heat_charge <= 0.0:
@@ -1019,7 +1186,47 @@ func _update_effects(delta: float) -> void:
 		parts.append("Soap size +%d%%" % roundi((brush_scale - 1.0) * 100.0))
 	if crown_speed > 1.0:
 		parts.append("Crown: speed +%d%%" % roundi((crown_speed - 1.0) * 100.0))
+	if radar_on:
+		parts.append("Radar on")
+	for fx in speed_fx:
+		parts.append("%s %ds" % ["Slowed" if float(fx["mult"]) < 1.0 else "Faster", ceili(float(fx["time"]))])
+	if chase_on:
+		parts.append("Forrest caught you: %d/%d" % [catches, CHASE_LIVES])
 	effect_label.text = "   ".join(parts)
+
+
+# Speed is the product of everything that changes it: the crown, an energy drink, other racers' items
+# and the map itself.
+func _apply_speed() -> void:
+	var mult := crown_speed * (ENERGY_BOOST if energy_time > 0.0 else 1.0)
+	for fx in speed_fx:
+		mult *= float(fx["mult"])
+	if is_open_world:
+		mult *= open_world.player_speed
+	player.speed_mult = mult
+
+
+func _add_speed_fx(mult: float, seconds: float) -> void:
+	speed_fx.append({"mult": mult, "time": seconds})
+	_apply_speed()
+
+
+# Timers for the multiplayer items that land on this player: slipping, suds in the face and speed changes.
+func _update_item_fx(dt: float) -> void:
+	var changed := false
+	for i in range(speed_fx.size() - 1, -1, -1):
+		speed_fx[i]["time"] = float(speed_fx[i]["time"]) - dt
+		if float(speed_fx[i]["time"]) <= 0.0:
+			speed_fx.remove_at(i)
+			changed = true
+	if changed:
+		_apply_speed()
+	slip_time = maxf(0.0, slip_time - dt)
+	player.stunned = slip_time > 0.0
+	player.camera.rotation.z = lerpf(player.camera.rotation.z, 0.45 if slip_time > 0.0 else 0.0, minf(dt * 8.0, 1.0))
+	suds_time = maxf(0.0, suds_time - dt)
+	if suds_overlay != null:
+		suds_overlay.color.a = minf(suds_time, 1.0) * 0.82
 
 
 func _update_cloud_safety(delta: float) -> void:
@@ -1043,7 +1250,27 @@ func _in_doorway(mount: Node3D, leaf: Node) -> bool:
 	if not leaf.get_meta("open"):
 		return false
 	var local := mount.to_local(player.global_position)
-	return absf(local.x) < 0.5 and local.z > -0.2 and local.z < 0.55 and local.y > -0.2 and local.y < 2.0
+	return absf(local.x) < 0.6 and local.z > -0.3 and local.z < 0.65 and local.y > -0.3 and local.y < 2.2
+
+
+# Every slot starts hidden except the one the bathroom door currently leads to; the two doors look
+# through to each other.
+func _init_portals() -> void:
+	if house.portals.is_empty():
+		push_warning("run-away shower: no wall could hold a door slot")
+		return
+	for i in house.portals.size():
+		_set_slot_active(i, false)
+		(house.portals[i]["view"] as PortalView).dest = bath_portal
+	portal_current = randi() % house.portals.size()
+	portal_visited.append(portal_current)
+	_set_slot_active(portal_current, true)
+	_link_bath_view()
+
+
+func _link_bath_view() -> void:
+	if bath_leaf != null and portal_current >= 0:
+		(bath_leaf.get_meta("view") as PortalView).dest = house.portals[portal_current]["mount"]
 
 
 func _exit_bathroom() -> void:
@@ -1051,53 +1278,66 @@ func _exit_bathroom() -> void:
 	if timer_mode == "door" and not timer_started:
 		timer_started = true
 		elapsed = 0.0
-	if portal_current < 0:
-		portal_current = randi() % house.portals.size()
-		portal_visited.append(portal_current)
 	var slot: Dictionary = house.portals[portal_current]
 	_set_slot_active(portal_current, true)
 	house.set_door_open(slot["leaf"], true)
-	_land_at(slot["mount"], 1.7)
-	if portal_hops < PORTAL_MAX_HOPS:
-		_relocate_portal()
+	_land_at(slot["mount"], slot["landing"])
+	_relocate_portal()
 
 
 func _enter_bathroom() -> void:
 	in_bath = true
 	_set_slot_active(portal_current, false)
 	house.set_door_open(bath_leaf, true)
-	_land_at(bath_portal, 1.7)
+	_land_at(bath_portal, _bath_landing())
 
 
-func _land_at(mount: Node3D, distance: float) -> void:
-	player.position = mount.to_global(Vector3(0, 0.95, distance))
+func _land_at(mount: Node3D, spot: Vector3) -> void:
+	player.position = spot
 	player.rotation.y = mount.global_rotation.y + PI
 	player.camera.rotation.x = 0.0
 	player.velocity = Vector3.ZERO
 
 
-# Moves the bathroom's door to another room, preferring rooms it hasn't been in, and keeps the door's
-# open/closed state.
+# A free spot on the bathroom floor in front of its door: the closest one to the door that isn't
+# taken by a fixture.
+func _bath_landing() -> Vector3:
+	var n := bath_portal.global_transform.basis.z
+	var side := Vector3(n.z, 0, -n.x)
+	for dist in [1.1, 1.4, 1.8, 2.3, 2.9]:
+		for offset in [0.0, 0.6, -0.6, 1.2, -1.2]:
+			var p: Vector3 = bath_portal.global_position + n * dist + side * offset
+			if absf(p.x) < room_w / 2.0 - 0.45 and absf(p.z) < room_d / 2.0 - 0.45 \
+					and _rect_free(Rect2(p.x - 0.4, p.z - 0.4, 0.8, 0.8)):
+				return Vector3(p.x, 0.95, p.z)
+	return Vector3(0.0, 0.95, 0.0)
+
+
+# The bathroom door jumps to another slot. It always moves (while hops remain): to a slot the player
+# hasn't seen, preferably one that is out of sight, falling back to any other slot.
 func _relocate_portal() -> void:
+	if portal_hops >= PORTAL_MAX_HOPS or house.portals.size() < 2:
+		return
 	var options: Array[int] = []
 	for pass_index in 3:
 		for i in house.portals.size():
+			if i == portal_current:
+				continue
 			var mount: Node3D = house.portals[i]["mount"]
 			var flat := Vector2(mount.global_position.x - player.position.x, mount.global_position.z - player.position.z)
 			var fresh := not portal_visited.has(i)
-			var far := flat.length() > 6.0
-			if i != portal_current and (pass_index == 2 or (fresh and (far or pass_index == 1))):
+			var far := flat.length() > 6.0 or absf(mount.global_position.y - player.position.y) > 2.0
+			if pass_index == 2 or (fresh and (far or pass_index == 1)):
 				options.append(i)
 		if not options.is_empty():
 			break
-	if options.is_empty():
-		return
 	var was_open: bool = house.portals[portal_current]["leaf"].get_meta("open")
 	_set_slot_active(portal_current, false)
 	portal_current = options.pick_random()
 	portal_visited.append(portal_current)
 	_set_slot_active(portal_current, true)
 	house.set_door_open(house.portals[portal_current]["leaf"], was_open)
+	_link_bath_view()
 	portal_hops += 1
 
 
@@ -1106,10 +1346,12 @@ func _set_slot_active(index: int, active: bool) -> void:
 	var mount: Node3D = house.portals[index]["mount"]
 	mount.visible = active
 	mount.process_mode = Node.PROCESS_MODE_INHERIT if active else Node.PROCESS_MODE_DISABLED
+	if not active:
+		(house.portals[index]["view"] as PortalView).viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 
 
 func _update_runaway(_delta: float) -> void:
-	if not house.sealed or house.portals.is_empty() or bath_leaf == null:
+	if not house.sealed or house.portals.is_empty() or bath_leaf == null or portal_current < 0:
 		return
 	if in_bath:
 		if _in_doorway(bath_portal, bath_leaf):
@@ -1126,13 +1368,15 @@ func _mp_finish() -> void:
 	_mp_spectate()
 
 
-# After finishing, or when the race is ended for them, players fly around and watch the standings.
+# After finishing, or when the race is ended for them, players fly around, chat and watch the standings.
 func _mp_spectate() -> void:
 	if mp_spectating:
 		return
 	mp_spectating = true
 	mp_panel.visible = true
+	chat_box.visible = true
 	_toggle_freecam()
+	_say("Press Enter to chat while you wait.", 5.0)
 
 
 func _on_mp_state() -> void:
@@ -1140,28 +1384,76 @@ func _on_mp_state() -> void:
 		"racing":
 			if MP.race_index() != mp_race:
 				get_tree().reload_current_scene()
-		"between":
+		"between", "final_scores":
 			_mp_spectate()
 		"final":
 			_mp_spectate()
 			_show_mp_final()
 
 
+func _begin_chat() -> void:
+	if is_paused or win_layer != null:
+		return
+	chat_box.begin_typing()
+
+
+func _on_chat_typing(typing: bool) -> void:
+	chat_typing = typing
+	if typing:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		_update_player_lock()
+
+
+# The end screen: the leaderboard and buttons on the left, every race's times on the right.
 func _show_mp_final() -> void:
 	if win_layer != null:
 		return
+	if chat_box != null:
+		chat_box.stop_typing()
+		chat_box.visible = false
 	win_layer = CanvasLayer.new()
 	win_layer.layer = 10
 	add_child(win_layer)
 	var box := _bubble_screen(win_layer)
-	box.add_child(_win_label("Final results", 64, 14))
+	var columns := HBoxContainer.new()
+	columns.add_theme_constant_override("separation", 40)
+	box.add_child(columns)
+
+	var left := VBoxContainer.new()
+	left.add_theme_constant_override("separation", 10)
+	columns.add_child(left)
+	left.add_child(_win_label("Final results", 64, 14))
 	var lines := MP.leaderboard_lines()
 	for i in mini(lines.size(), 6):
-		box.add_child(_win_label(lines[i], 28, 8))
+		left.add_child(_win_label(lines[i], 28, 8))
 	if lines.size() > 6:
-		box.add_child(_win_label("+%d more" % (lines.size() - 6), 22, 6))
-	_win_button(box, "Return to Lobby", Color(0.75, 1.0, 0.85), _on_mp_lobby)
-	_win_button(box, "Quit to Menu", Color(0.85, 0.8, 1.0), _on_main_menu)
+		left.add_child(_win_label("+%d more" % (lines.size() - 6), 22, 6))
+	_win_button(left, "Return to Lobby", Color(0.75, 1.0, 0.85), _on_mp_lobby)
+	_win_button(left, "Quit to Menu", Color(0.85, 0.8, 1.0), _on_main_menu)
+
+	var panel := Ui.panel()
+	columns.add_child(panel)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(520, 420)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroll)
+	var times := VBoxContainer.new()
+	times.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(times)
+	times.add_child(Ui.ink_label("Times on every map", 28))
+	for entry in MP.state.get("history", []):
+		var map_name: String = GameState.TEMPLATES.get(str(entry["template"]), str(entry["template"]))
+		var header := "Race %d: %s" % [int(entry["index"]) + 1, map_name]
+		if str(entry["seed"]) != "":
+			header += "  (seed %s)" % str(entry["seed"])
+		times.add_child(Ui.ink_label(header, 22))
+		var results: Array = entry["results"]
+		for i in results.size():
+			times.add_child(Ui.ink_label("   %d. %s   %s   (+%d)" % [i + 1, str(results[i][0]),
+					MP.time_text(float(results[i][1])), int(results[i][2])], 18))
+		if not (entry["dnf"] as Array).is_empty():
+			times.add_child(Ui.ink_label("   Did not finish: %s" % ", ".join(entry["dnf"]), 18))
 	_update_player_lock()
 
 
@@ -1305,9 +1597,11 @@ func _setup_house() -> void:
 	var bath_rect := Rect2(-room_w / 2.0 - 0.1, -room_d / 2.0 - 0.1, room_w + 0.2, room_d + 0.2)
 	if not house.plan(template, bath_rect, door_wall, door_along, needs_boiler, bool(rules["run_shower"])):
 		template = "bathroom"
-	is_open_world = template == "cloud_walk" or template == "beach"
+	is_open_world = template in GameState.OPEN_TEMPLATES
 	is_giant = template == "giant_house"
-	runner_bottles = template == "runaway_bottles" or (bool(rules["run_bottles"]) and template != "cloud_walk")
+	runner_bottles = template == "runaway_bottles" or (bool(rules["run_bottles"]) \
+			and not (template in ["cloud_walk", "lab", "golf", "lake", "monster_movie", "treasure_hunt"]))
+	chase_on = requested_template == "chase" or bool(rules["always_chase"])
 
 # --- Scene building ---
 
@@ -1407,7 +1701,7 @@ func _build_sky() -> void:
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
-	var sun := DirectionalLight3D.new()
+	sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-50, 35, 0)
 	sun.light_energy = 1.1
 	sun.shadow_enabled = true
@@ -1415,10 +1709,14 @@ func _build_sky() -> void:
 
 
 func _build_open_world() -> void:
-	open_world = OpenWorld.new()
+	if MAP_SCRIPTS.has(template):
+		open_world = (load(MAP_SCRIPTS[template]) as GDScript).new()
+	else:
+		open_world = OpenWorld.new()
 	open_world.main = self
 	add_child(open_world)
 	open_world.build(template)
+	open_world.customize_env(env, sun)
 
 
 func _build_environment() -> void:
@@ -1561,13 +1859,16 @@ func _build_bath_boiler() -> void:
 	mount.add_child(boiler)
 
 
-# At least one bottle is always in the bathroom; basement and maze templates force one more down there.
+# Only one bottle may start in the bathroom, and it only does so half the time (the bathroom-only level
+# keeps all three there). Basement and maze templates force one down there; sealed houses and run-away
+# bottles keep the bathroom empty, since it is cut off or the bottles would just run out.
 func _build_bottles() -> void:
 	if is_open_world:
 		var open_ids := order.duplicate()
 		open_ids.shuffle()
 		for i in open_ids.size():
 			_make_bottle(open_ids[i], open_world.bottle_spots[i])
+			open_world.bind_bottle(i, bottles[bottles.size() - 1], open_ids[i])
 		if decoy_id != "":
 			_make_bottle(decoy_id, open_world.decoy_spot())
 			bottles[bottles.size() - 1].set_meta("decoy", true)
@@ -1575,38 +1876,37 @@ func _build_bottles() -> void:
 	spot_pools = _collect_pools()
 	var pools := spot_pools
 	var targets: Array[String] = []
-	if (house.sealed or runner_bottles) and not pools.is_empty():
-		# Nothing starts in the bathroom: it is sealed off, or the bottles would just run out.
+	var forced: Array[String] = []
+	if pools.is_empty():
+		# Nowhere but the bathroom (the bathroom-only level).
+		while targets.size() < order.size():
+			targets.append("bathroom")
+	else:
 		while targets.size() < order.size():
 			targets.append("house")
-	else:
-		targets.append("bathroom")
+		if house.has_room_type("tomb"):
+			forced.append("tomb")  # the crypt keeps one bottle behind its tomb door
+		if house.yard_room != null:
+			forced.append("yard")  # the doghouse keeps one beside the dog's stake
 		if house.has_room_type("maze"):
-			targets.append("maze")
+			forced.append("maze")
 		elif house.has_room_type("basement"):
-			targets.append("basement")
-		while targets.size() < order.size():
-			var outside := not pools.is_empty() and randf() < HOUSE_SPAWN_CHANCE
-			targets.append("house" if outside else "bathroom")
-		if (template == "castle" or template == "crypt") and not pools.is_empty():
-			# Always at least two bottles outside the bathroom.
-			for i in targets.size():
-				if targets.count("house") >= 2:
-					break
-				if targets[i] == "bathroom":
-					targets[i] = "house"
-	if house.has_room_type("tomb"):
-		# The crypt always keeps one bottle behind its tomb door.
-		targets[0] = "tomb"
+			forced.append("basement")
+		if not (house.sealed or runner_bottles) and randf() < BATHROOM_BOTTLE_CHANCE:
+			forced.append("bathroom")
+		for i in mini(forced.size(), targets.size()):
+			targets[i] = forced[i]
 	var ids := order.duplicate()
 	ids.shuffle()
 	for i in ids.size():
 		if targets[i] == "tomb":
 			_make_bottle(ids[i], house.tomb_spot(), true)
+		elif targets[i] == "yard":
+			_make_bottle(ids[i], house.to_global(house.yard_spot), true)
 		else:
 			_make_bottle(ids[i], _take_spot(targets[i], pools))
 	if decoy_id != "":
-		var decoy_target := "house" if not pools.is_empty() and (house.sealed or runner_bottles or randf() < 0.7) else "bathroom"
+		var decoy_target := "house" if not pools.is_empty() else "bathroom"
 		_make_bottle(decoy_id, _take_spot(decoy_target, pools))
 		bottles[bottles.size() - 1].set_meta("decoy", true)
 
@@ -1677,6 +1977,10 @@ func _spawn_items() -> void:
 		var crown := Items.crown()
 		crown.position = house.treasure_spot + Vector3(0, float(crown.get_meta("rest")), 0)
 		add_child(crown)
+	var tomb_crown := house.tomb_crown_spot()
+	if tomb_crown != Vector3.INF:
+		_place_item(Items.crypt_crown(), tomb_crown)
+	var mp_placed := 0
 	for pool in spot_pools:
 		var spots: Array = pool["spots"]
 		var kind: String = pool["type"]
@@ -1684,6 +1988,68 @@ func _spawn_items() -> void:
 			_place_item(Items.energy_drink(), _pop_random(spots))
 		if not spots.is_empty() and (kind == "bedroom" or kind == "closet") and randf() < BRUSH_CHANCE * mult:
 			_place_item(Items.brush(), _pop_random(spots))
+		if not spots.is_empty() and (kind == "bedroom" or kind == "bathroom2" or kind == "closet") \
+				and randf() < LOOFA_CHANCE * mult:
+			_place_item(Items.loofa(), _pop_random(spots))
+		if not spots.is_empty() and randf() < RADAR_CHANCE * mult:
+			_place_item(Items.bottle_radar(), _pop_random(spots))
+		if MP.active and not spots.is_empty() and randf() < MP_ITEM_CHANCE * mult:
+			_place_item(_mp_item_for(kind), _pop_random(spots))
+			mp_placed += 1
+	if template == "maze":
+		# The scary maze always hides a bottle radar in its basement.
+		var radar_pool: Dictionary = {}
+		for wanted in ["basement", "maze"]:
+			for pool in spot_pools:
+				if radar_pool.is_empty() and pool["type"] == wanted and not pool["spots"].is_empty():
+					radar_pool = pool
+		if not radar_pool.is_empty():
+			_place_item(Items.bottle_radar(), _pop_random(radar_pool["spots"]))
+	if template == "doghouse":
+		var homes := spot_pools.filter(func(p): return not p["spots"].is_empty() and not p["room"].dark)
+		if not homes.is_empty():
+			_place_item(Items.bone(), _pop_random(homes.pick_random()["spots"]))
+	var attempts := 0
+	while MP.active and mp_placed < MP_ITEM_MINIMUM and attempts < 20:
+		attempts += 1
+		var open := spot_pools.filter(func(p): return not p["spots"].is_empty())
+		if open.is_empty():
+			break
+		var pool: Dictionary = open.pick_random()
+		_place_item(_mp_item_for(String(pool["type"])), _pop_random(pool["spots"]))
+		mp_placed += 1
+
+
+# Which household item suits a room.
+func _mp_item_for(kind: String) -> StaticBody3D:
+	var options: Array = ["banana", "fan", "bathbomb"]
+	match kind:
+		"kitchen":
+			options = ["banana", "icecubes"]
+		"bathroom2":
+			options = ["bathbomb", "towel"]
+		"closet":
+			options = ["bathbomb", "towel", "fan"]
+		"living":
+			options = ["fan", "banana"]
+		"bedroom":
+			options = ["towel", "fan"]
+		"dining":
+			options = ["icecubes", "banana"]
+		"hallway":
+			options = ["banana", "bathbomb"]
+		"basement", "attic":
+			options = ["icecubes", "fan"]
+	match String(options.pick_random()):
+		"banana":
+			return Items.banana_peel()
+		"bathbomb":
+			return Items.bath_bomb()
+		"icecubes":
+			return Items.ice_tray()
+		"fan":
+			return Items.box_fan()
+	return Items.warm_towel()
 
 
 func _spawn_open_items(mult: float) -> void:
@@ -1698,6 +2064,18 @@ func _spawn_open_items(mult: float) -> void:
 	if template == "cloud_walk" and mult > 0.0:
 		if randf() < minf(0.5 * mult, 1.0):
 			_place_item(Items.brush(), open_world.item_spots["brush"] + Vector3(0, 0.11, 0))
+	elif template != "beach" and mult > 0.0:
+		if randf() < minf(0.6 * mult, 1.0):
+			_place_item(Items.brush(), open_world.extra_spot())
+		if randf() < minf(0.4 * mult, 1.0):
+			_place_item(Items.energy_drink(), open_world.extra_spot())
+	if mult > 0.0 and randf() < minf(RADAR_CHANCE * 2.0 * mult, 1.0):
+		_place_item(Items.bottle_radar(), open_world.extra_spot())
+	if mult > 0.0 and randf() < minf(LOOFA_CHANCE * 2.0 * mult, 1.0):
+		_place_item(Items.loofa(), open_world.extra_spot())
+	if MP.active:
+		for i in MP_ITEM_MINIMUM + 1:
+			_place_item(_mp_item_for(""), open_world.extra_spot())
 
 
 # `spot` is a bottle position: 0.11 above the surface the item lies on.
@@ -1715,13 +2093,38 @@ func _take_spot(target: String, pools: Array) -> Vector3:
 	elif target == "house":
 		var candidates := pools.filter(func(p): return not p["spots"].is_empty())
 		if not candidates.is_empty():
-			return _pop_random(candidates.pick_random()["spots"])
+			return _hard_spot(candidates)
 	var use_shower := randf() < SHOWER_SPAWN_CHANCE
 	if shower_spots.is_empty():
 		use_shower = false
 	elif room_spots.is_empty():
 		use_shower = true
 	return _pop_random(shower_spots if use_shower else room_spots)
+
+
+# Bottles hide far from the bathroom, on upper floors, in closets and bedrooms, up on furniture rather than
+# on the floor, and never two in the same room while another room is free.
+func _hard_spot(candidates: Array) -> Vector3:
+	var scored: Array = candidates.map(func(p): return [_hide_score(p), p])
+	scored.sort_custom(func(a, b): return a[0] > b[0])
+	var pool: Dictionary = scored[randi() % maxi(1, ceili(scored.size() / 2.0))][1]
+	var room = pool["room"]
+	bottle_rooms.append(room)
+	var spots: Array = pool["spots"]
+	var raised: Array = spots.filter(func(s: Vector3): return s.y - room.y0 > 0.3)
+	var pick: Vector3 = raised.pick_random() if not raised.is_empty() and randf() < 0.8 else spots.pick_random()
+	spots.erase(pick)
+	return pick
+
+
+func _hide_score(pool: Dictionary) -> float:
+	var room = pool["room"]
+	var score: float = room.rect.get_center().length() + 8.0 * int(pool["level"]) + randf() * 4.0
+	if pool["type"] in ["closet", "bedroom", "attic", "tower_top"]:
+		score += 6.0
+	if bottle_rooms.has(room):
+		score -= 25.0
+	return score
 
 
 func _pop_random(spots: Array) -> Vector3:
@@ -1871,15 +2274,17 @@ func _make_bottle(id: String, pos: Vector3, force_static := false) -> void:
 		add_child(body)
 	else:
 		var solid := StaticBody3D.new()
+		solid.collision_layer = Items.ITEM_LAYER  # the player walks through it; clicks still hit
+		solid.collision_mask = 0
 		solid.position = pos
 		body = solid
 		_tag_bottle(body, id)
 		var cs := CollisionShape3D.new()
 		var shape := CylinderShape3D.new()
-		shape.radius = 0.08
-		shape.height = 0.32
+		shape.radius = 0.1  # hitboxes are 25% bigger than the model
+		shape.height = 0.4
 		cs.shape = shape
-		cs.position = Vector3(0, 0.045, 0)
+		cs.position = Vector3(0, 0.085, 0)
 		body.add_child(cs)
 		add_child(body)
 		_prop(_cyl(0.05, 0.22), Vector3.ZERO, _mat(BOTTLE_COLORS[id]), false, Vector3.ZERO, body)
@@ -1908,21 +2313,24 @@ func _build_player() -> void:
 				break
 	player = PlayerScript.new()
 	player.position = spawn
+	spawn_point = spawn
 	safe_pos = spawn
-	player.can_jump = template == "cloud_walk"
+	if is_open_world:
+		player.swim_level = open_world.swim_level
+	player.can_jump = template == "cloud_walk" or (is_open_world and open_world.player_jump > 0.0)
 	if player.can_jump:
-		player.jump_mult = CLOUD_JUMP
+		player.jump_mult = CLOUD_JUMP if template == "cloud_walk" else open_world.player_jump
 	if not is_open_world:
 		var stall_center := (stall_min + stall_max) / 2.0
 		player.rotation.y = atan2(spawn.x - stall_center.x, spawn.z - stall_center.y)
 	add_child(player)
-	var nav := {}
-	if not runners.is_empty():
-		nav = open_world.nav_graph() if is_open_world else house.nav_graph()
+	_apply_speed()
+	if not runners.is_empty() or chase_on:
+		map_nav = open_world.nav_graph() if is_open_world else house.nav_graph()
 	for runner in runners:
 		runner.set_threat(player)
 		runner.house = house
-		runner.graph = nav
+		runner.graph = map_nav
 	player.clicked.connect(_on_clicked)
 	player.right_clicked.connect(_on_right_clicked)
 
@@ -1945,6 +2353,12 @@ func _build_hud() -> void:
 	blind_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud.add_child(blind_overlay)
 	blind_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+	suds_overlay = ColorRect.new()
+	suds_overlay.color = Color(1, 1, 1, 0)
+	suds_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(suds_overlay)
+	suds_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
 	timer_label = _hud_label(48)
 	timer_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -1985,13 +2399,216 @@ func _build_hud() -> void:
 		race_label.text = MP.race_label()
 		mp_panel = MpPanel.new()
 		hud.add_child(mp_panel)
-		mp_panel.anchor_left = 1.0
-		mp_panel.anchor_right = 1.0
-		mp_panel.offset_left = -380.0
-		mp_panel.offset_right = -20.0
+		mp_panel.anchor_left = 0.0
+		mp_panel.anchor_right = 0.0
+		mp_panel.offset_left = 20.0
+		mp_panel.offset_right = 380.0
 		mp_panel.offset_top = 90.0
 		mp_panel.offset_bottom = 90.0
 		mp_panel.visible = false
+		chat_box = ChatBox.new(true)
+		hud.add_child(chat_box)
+		chat_box.anchor_left = 1.0
+		chat_box.anchor_right = 1.0
+		chat_box.anchor_top = 1.0
+		chat_box.anchor_bottom = 1.0
+		chat_box.offset_left = -420.0
+		chat_box.offset_right = -20.0
+		chat_box.offset_top = -330.0
+		chat_box.offset_bottom = -20.0
+		chat_box.visible = false
+		chat_box.typing_changed.connect(_on_chat_typing)
+
+
+# --- Evil Forrest, the guard dog and the multiplayer items ---
+
+func _build_extras() -> void:
+	if template == "power_outage":
+		_equip_flashlight()
+		_set_flashlight(true)
+	if chase_on and not map_nav.is_empty():
+		chaser = ChaserScript.new()
+		add_child(chaser)
+		chaser.setup(player, house, map_nav)
+		chaser.caught.connect(_on_chaser_caught)
+	if house != null and house.dog_stake != Vector3.INF:
+		dog = DogScript.new()
+		add_child(dog)
+		dog.setup(player, house)
+		dog.bitten.connect(_on_dog_bite)
+		dog.growled.connect(func(): _say("The dog growls... it won't let you near the soap. Find a bone!", 4.0))
+
+
+# Whether the things that hunt the player may act: not while paused alone, in a minigame, or when the
+# race is over for this player.
+func _threats_active() -> bool:
+	return state != State.FINISHED and not lost and not mp_spectating and minigame == null and puzzle == null \
+			and win_layer == null and not (is_paused and not MP.active)
+
+
+func _update_chase(_dt: float) -> void:
+	var active := _threats_active()
+	if chaser != null:
+		chaser.active = active
+	if dog != null:
+		dog.active = active
+
+
+func _on_chaser_caught() -> void:
+	catches += 1
+	if catches >= CHASE_LIVES:
+		_lose_race("Evil Forrest caught you for the third time!")
+		return
+	_respawn_in_bathroom()
+	chaser.send_away()
+	_say("Evil Forrest caught you! Back to the bathroom (%d/%d catches)." % [catches, CHASE_LIVES], 5.0)
+
+
+# Back to where the level began: the bathroom, or the start spot on maps without one.
+func _respawn_in_bathroom() -> void:
+	player.position = spawn_point
+	player.velocity = Vector3.ZERO
+	if house != null and house.sealed:
+		in_bath = true
+
+
+func _lose_race(reason: String) -> void:
+	if lost:
+		return
+	lost = true
+	state = State.FINISHED
+	if MP.active:
+		MP.report_dnf()
+		_say("%s You're out of this race." % reason, 6.0)
+		_mp_spectate()
+		return
+	if win_layer != null:
+		return
+	win_layer = CanvasLayer.new()
+	win_layer.layer = 10
+	add_child(win_layer)
+	var box := _bubble_screen(win_layer)
+	box.add_child(_win_label("You lose!", 84, 16))
+	box.add_child(_win_label(reason, 30, 8))
+	_win_button(box, "Restart Level", Color(1.0, 0.95, 0.7), _on_restart_level)
+	_win_button(box, "Main Menu", Color(0.85, 0.8, 1.0), _on_main_menu)
+	_update_player_lock()
+
+
+func _on_dog_bite() -> void:
+	slip_time = maxf(slip_time, 2.5)
+	player.position = dog.eject_position()
+	player.velocity = Vector3.ZERO
+	_say("The dog bit you! You scramble back towards the gate.", 4.0)
+
+
+func _throw_bone() -> void:
+	if dog == null:
+		_say("There's no dog here to give it to. Right click puts it down.")
+		return
+	var hit := player.aim_hit(14.0)
+	var at: Vector3
+	if hit.is_empty():
+		at = player.global_position - player.global_transform.basis.z * 6.0
+		at.y = house.to_global(house.dog_stake).y
+	else:
+		at = hit["position"]
+	if dog.distract(at):
+		_discard_held("You throw the bone! The dog chases after it. Quick, grab the soap!")
+	else:
+		_say("The dog doesn't notice. Throw it into the yard, away from the soap.")
+
+
+# Rivals still racing, for items that target another player.
+func _racing_rivals() -> Array[int]:
+	var done := {}
+	for f in MP.state.get("finishes", []):
+		done[int(f["id"])] = true
+	var result: Array[int] = []
+	for id in MP.state.get("participants", []):
+		if int(id) != Net.my_id and not done.has(int(id)) and Net.peers.has(int(id)):
+			result.append(int(id))
+	return result
+
+
+func _use_mp_item(kind: String) -> void:
+	if not MP.active:
+		_say("Nothing happens. This one only works in a multiplayer race.")
+		return
+	var rivals := _racing_rivals()
+	if rivals.is_empty() and kind != "fan":
+		_say("Nobody else is racing right now. Save it.")
+		return
+	match kind:
+		"banana":
+			Net.send_to(rivals.pick_random(), {"k": "fx", "fx": "banana"})
+			_discard_held("You toss the banana peel in front of a rival. Splat!")
+		"bathbomb":
+			Net.broadcast({"k": "fx", "fx": "bathbomb"})
+			_discard_held("You drop the bubble bath bomb. Everyone else is going to get suds in their eyes!")
+		"icecubes":
+			Net.broadcast({"k": "fx", "fx": "icecubes"})
+			_discard_held("You scatter ice cubes. The other racers' feet are freezing!")
+		"fan":
+			Net.broadcast({"k": "fx", "fx": "fan"})
+			_add_speed_fx(TAILWIND_MULT, TAILWIND_SECONDS)
+			_discard_held("The box fan whirs! Everyone racing gets a tailwind, you included.")
+		"towel":
+			Net.send_to(rivals.pick_random(), {"k": "fx", "fx": "towel"})
+			_add_speed_fx(COZY_MULT, COZY_SECONDS)
+			_discard_held("You share a warm towel with a rival. You both feel toasty and quick!")
+
+
+func _on_net_message(from: int, data: Dictionary) -> void:
+	if str(data.get("k", "")) == "fx":
+		_receive_fx(from, str(data.get("fx", "")))
+
+
+# An item another racer used lands on this player.
+func _receive_fx(from: int, fx: String) -> void:
+	if player == null or state == State.FINISHED or mp_spectating or lost:
+		return
+	var who := str(Net.peers.get(from, "Someone"))
+	match fx:
+		"banana":
+			slip_time = SLIP_SECONDS
+			_say("%s threw a banana peel under you! You slip and fall." % who, 4.0)
+		"bathbomb":
+			suds_time = SUDS_SECONDS
+			_say("%s dropped a bubble bath bomb. You can barely see!" % who, 4.0)
+		"icecubes":
+			_add_speed_fx(CHILL_MULT, CHILL_SECONDS)
+			_say("%s scattered ice cubes. Your feet are freezing: you're slowed down." % who, 4.0)
+		"fan":
+			_add_speed_fx(TAILWIND_MULT, TAILWIND_SECONDS)
+			_say("%s switched on a box fan. Tailwind! You're faster for a while." % who, 4.0)
+		"towel":
+			_add_speed_fx(COZY_MULT, COZY_SECONDS)
+			_say("%s wrapped you in a warm towel. Toasty speed boost!" % who, 4.0)
+
+
+# --- Hooks for the special maps ---
+
+# Shows a minigame on the HUD and locks the player until it closes (it emits `closed` when the player
+# steps away).
+func open_overlay(game: Control) -> void:
+	if puzzle != null or minigame != null:
+		game.queue_free()
+		return
+	hud.add_child(game)
+	game.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	if game.has_signal("closed"):
+		game.connect("closed", _close_puzzle)
+	puzzle = game
+	_update_player_lock()
+
+
+func close_overlay() -> void:
+	_close_puzzle()
+
+
+func say(text: String, duration := 3.0) -> void:
+	_say(text, duration)
 
 
 func _hud_label(font_size: int) -> Label:

@@ -61,7 +61,9 @@ func _capped(lines: Array[String]) -> Array[String]:
 func _footer_text() -> String:
 	match MP.phase():
 		"racing":
-			return "Waiting for the other racers..." + ("\nHost: press Enter to end the race" if Net.is_host else "")
+			return "Waiting for the other racers..." + ("\nHost: Esc > End Race / End Game" if Net.is_host else "")
 		"between":
 			return "Next race in %d" % ceili(MP.countdown)
+		"final_scores":
+			return "Final results in %d" % ceili(MP.countdown)
 	return ""

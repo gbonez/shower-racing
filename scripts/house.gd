@@ -37,6 +37,7 @@ const PALETTE := {
 	"throne_room": [Color(0.55, 0.5, 0.52), Color(0.35, 0.33, 0.35)],
 	"tower": [Color(0.55, 0.55, 0.57), Color(0.38, 0.37, 0.38)],
 	"tower_top": [Color(0.6, 0.57, 0.52), Color(0.45, 0.35, 0.25)],
+	"yard": [Color(0.62, 0.45, 0.28), Color(0.2, 0.5, 0.2)],
 }
 
 
@@ -89,6 +90,12 @@ var basement_top := Vector3.INF  # top of the stairs down to the basement, in ho
 var boiler_placed := false  # a boiler is somewhere in the house
 var photos: Array[Texture2D] = []  # pictures for wall frames, loaded on first use
 var sealed := false  # run-away shower: the bathroom has no doorway into the house
+var power_out := false  # power outage: every room is dark and the house lights stay off
+var yard_room: Room = null  # the doghouse's fenced yard
+var dog_stake: Vector3 = Vector3.INF  # where the guard dog's chain is pinned, in house coordinates
+var yard_spot: Vector3 = Vector3.INF  # the guarded bottle's spot beside the stake, in house coordinates
+var room_furniture: Dictionary = {}  # Room -> the furniture nodes built in it, so blockers can be removed
+var photo_bag: Array[Texture2D] = []  # photos not yet hung on a wall; refilled when it runs out
 
 
 # --- Planning ---
@@ -101,11 +108,11 @@ func plan(template: String, bath_rect: Rect2, door_side: int, door_pos: float, b
 		sealed = false
 		var bath := _new_room("bathroom", bath_rect, 0, 0)
 		if _plan_template(template, bath, door_side, door_pos):
-			var can_seal := not (template in ["bathroom", "cloud_walk", "beach", "giant_house"])
+			var can_seal := not (template in ["bathroom", "giant_house"] or template in GameState.OPEN_TEMPLATES)
 			if template == "runaway_shower" or (runaway_on and can_seal):
 				_seal_bathroom()
 				sealed = true
-			if not (template in ["bathroom", "cloud_walk", "beach"]):
+			if template != "bathroom" and not (template in GameState.OPEN_TEMPLATES):
 				_add_closets()
 			if boiler_on:
 				want_boiler = true
@@ -123,6 +130,10 @@ func plan(template: String, bath_rect: Rect2, door_side: int, door_pos: float, b
 	door_h = DOOR_H
 	basement_top = Vector3.INF
 	size_mult = 1.0
+	power_out = false
+	yard_room = null
+	dog_stake = Vector3.INF
+	yard_spot = Vector3.INF
 	_new_room("bathroom", bath_rect, 0, 0)
 	return false
 
@@ -159,6 +170,8 @@ func _new_room(type: String, rect: Rect2, lo: int, hi: int) -> Room:
 	if castle and type != "stairs":
 		var heights: Dictionary = CRYPT_H if crypt else CASTLE_H
 		r.y1 = r.y0 + float(heights.get(type, 3.0))
+	if type == "yard":
+		r.y1 = r.y0 + 2.4  # a tall fence, open to the sky
 	r.dark = type == "basement" or type == "maze"
 	rooms.append(r)
 	return r
@@ -181,9 +194,22 @@ func _plan_template(t: String, bath: Room, ds: int, dp: float) -> bool:
 	door_w = DOOR_W
 	door_h = DOOR_H
 	basement_top = Vector3.INF
+	power_out = false
+	yard_room = null
+	dog_stake = Vector3.INF
+	yard_spot = Vector3.INF
 	match t:
-		"bathroom", "cloud_walk", "beach":
+		"bathroom":
 			return true
+		"cloud_walk", "beach", "warehouse", "lab", "monster_movie", "golf", "lake", "treasure_hunt":
+			return true
+		"power_outage":
+			power_out = true
+			return _plan_house("house", bath, door_sides, dp)
+		"chase":
+			return _plan_house("house", bath, door_sides, dp)
+		"doghouse":
+			return _plan_doghouse(bath, door_sides, dp)
 		"upside_down":
 			upside_down = true
 			return _plan_flat_house(bath, door_sides, dp)
@@ -351,6 +377,23 @@ func _open_or_door() -> String:
 	return "open" if randf() < 0.5 else "door"
 
 
+# A one-floor house with a fenced back yard reached by a door from the living areas.
+func _plan_doghouse(bath: Room, door_sides: Array, dp: float) -> bool:
+	if not _plan_flat_house(bath, door_sides, dp):
+		return false
+	var hosts: Array[Room] = []
+	for r in rooms:
+		if r.type in ["living", "kitchen", "dining", "hallway"]:
+			hosts.append(r)
+	hosts.shuffle()
+	for host in hosts:
+		var yard := _place("yard", host, "door", 0)
+		if yard != null:
+			yard_room = yard
+			return true
+	return false
+
+
 # Where a player stands just outside the doorway of `stairs`, in the room it hangs off.
 func _landing_above(stairs: Room) -> Vector3:
 	for c in conns:
@@ -416,7 +459,10 @@ func _plan_castle(bath: Room, door_sides: Array, dp: float) -> bool:
 		return false
 	# The treasure vault goes behind the throne room, then a walled garden somewhere along the hall.
 	var vault: Room = null
-	for host in [throne, great, gate]:
+	var vault_hosts: Array = rooms.filter(func(rm): return rm.type == "bedroom")  # tucked behind a bedroom
+	vault_hosts.shuffle()
+	vault_hosts.append_array([throne, great, gate])
+	for host in vault_hosts:
 		vault = _place("treasure", host, "door", 0)
 		if vault != null:
 			break
@@ -546,6 +592,8 @@ func _room_size(type: String, side: int) -> Vector2:
 			s = Vector2(randf_range(8.0, 10.0), randf_range(8.0, 10.0))
 		"courtyard":
 			s = Vector2(randf_range(13.0, 17.0), randf_range(12.0, 15.0))
+		"yard":
+			s = Vector2(randf_range(9.0, 11.5), randf_range(8.5, 10.5))
 		"treasure":
 			s = Vector2(randf_range(7.0, 9.0), randf_range(7.0, 9.0))
 		"tomb":
@@ -692,19 +740,21 @@ func _attach(parent: Room, type: String, size: Vector2, side: int, kind: String,
 
 func _add_opening(r: Room, side: int, lo: float, hi: float, y0: float, kind: String, height := DOOR_H) -> void:
 	r.openings.append({"side": side, "lo": lo, "hi": hi, "y0": y0, "kind": kind, "h": height})
+	r.used.append(_opening_rect(r, side, lo, hi, kind))
+
+
+# The floor strip kept clear in front of an opening.
+func _opening_rect(r: Room, side: int, lo: float, hi: float, kind: String) -> Rect2:
 	var inner := r.interior()
 	var depth := 0.6 if kind == "open" else 1.1
-	var rect: Rect2
 	match side:
 		0:
-			rect = Rect2(lo - 0.15, inner.end.y - depth, hi - lo + 0.3, depth)
+			return Rect2(lo - 0.15, inner.end.y - depth, hi - lo + 0.3, depth)
 		1:
-			rect = Rect2(lo - 0.15, inner.position.y, hi - lo + 0.3, depth)
+			return Rect2(lo - 0.15, inner.position.y, hi - lo + 0.3, depth)
 		2:
-			rect = Rect2(inner.end.x - depth, lo - 0.15, depth, hi - lo + 0.3)
-		_:
-			rect = Rect2(inner.position.x, lo - 0.15, depth, hi - lo + 0.3)
-	r.used.append(rect)
+			return Rect2(inner.end.x - depth, lo - 0.15, depth, hi - lo + 0.3)
+	return Rect2(inner.position.x, lo - 0.15, depth, hi - lo + 0.3)
 
 
 func _attach_maze(basement: Room) -> Room:
@@ -772,6 +822,8 @@ func has_room_type(type: String) -> bool:
 
 # True inside the basement and maze, but not on the stairs down or in lit pockets.
 func is_dark_at(p: Vector3) -> bool:
+	if power_out:
+		return true
 	var r := room_at(p)
 	if r == null or not r.dark:
 		return false
@@ -800,7 +852,7 @@ func clamp_to_rooms(pos: Vector3, fallback: Vector3) -> Vector3:
 func collect_pools() -> Array:
 	var pools: Array = []
 	for i in range(1, rooms.size()):
-		if rooms[i].type in ["tomb", "treasure"]:
+		if rooms[i].type in ["tomb", "treasure", "yard"]:
 			continue
 		if not rooms[i].spots.is_empty():
 			pools.append({"type": rooms[i].type, "spots": rooms[i].spots, "level": rooms[i].lvl_lo, "room": rooms[i]})
@@ -815,7 +867,18 @@ func tomb_spot() -> Vector3:
 	return Vector3.INF
 
 
-# A spot for the golden key that can be reached while every lock (and the vault) is shut.
+# Where the crypt crown rests: on the sarcophagus lid beside the tomb's bottle spot (same height
+# convention as a bottle spot).
+func tomb_crown_spot() -> Vector3:
+	for r in rooms:
+		if r.type == "tomb":
+			var c := r.interior().get_center()
+			return Vector3(c.x + 0.7, r.y0 + 1.21, c.y)
+	return Vector3.INF
+
+
+# A spot for the golden key that can be reached while every lock (and the vault) is shut. It goes in one
+# of the rooms farthest from the bathroom, up on furniture when there is any.
 func golden_key_spot(pools: Array) -> Vector3:
 	var locked := {}
 	for d in door_leaves:
@@ -825,10 +888,15 @@ func golden_key_spot(pools: Array) -> Vector3:
 	var options := pools.filter(func(p): return reach.has(p["room"]) and not p["room"].dark and not p["spots"].is_empty())
 	if options.is_empty():
 		return Vector3.INF
-	var spots: Array = options.pick_random()["spots"]
-	var index := randi() % spots.size()
-	var spot: Vector3 = spots[index]
-	spots.remove_at(index)
+	var home := rooms[0].rect.get_center()
+	options.sort_custom(func(a, b): return home.distance_to(a["room"].rect.get_center()) + 10.0 * a["level"] \
+			> home.distance_to(b["room"].rect.get_center()) + 10.0 * b["level"])
+	var pool: Dictionary = options.slice(0, maxi(1, options.size() / 3)).pick_random()
+	var room: Room = pool["room"]
+	var spots: Array = pool["spots"]
+	var raised: Array = spots.filter(func(s: Vector3): return s.y - room.y0 > 0.5)
+	var spot: Vector3 = raised.pick_random() if not raised.is_empty() else spots.pick_random()
+	spots.erase(spot)
 	return spot
 
 
@@ -948,8 +1016,14 @@ func _room_waypoints(r: Room) -> Array[Vector3]:
 	if inner.size.x <= 0.0 or inner.size.y <= 0.0:
 		inner = Rect2(r.interior().get_center(), Vector2.ZERO)
 	var c := inner.get_center()
-	var candidates: Array[Vector2] = [c, Vector2(c.x, inner.position.y), Vector2(c.x, inner.end.y),
-			Vector2(inner.position.x, c.y), Vector2(inner.end.x, c.y)]
+	var candidates: Array[Vector2] = [c]
+	# A grid of waypoints, denser in bigger rooms, so the bottles have plenty of places to run to.
+	var cols := clampi(ceili(inner.size.x / 2.5) + 1, 2, 5)
+	var rows := clampi(ceili(inner.size.y / 2.5) + 1, 2, 5)
+	for gx in cols:
+		for gy in rows:
+			candidates.append(Vector2(inner.position.x + inner.size.x * gx / float(cols - 1),
+					inner.position.y + inner.size.y * gy / float(rows - 1)))
 	for p in candidates:
 		if _free(r, Rect2(p - Vector2(0.3, 0.3), Vector2(0.6, 0.6))):
 			result.append(Vector3(p.x, r.y0, p.y))
@@ -1016,15 +1090,17 @@ func decoy_spots(pools: Array, count: int) -> Array:
 
 
 # A free-standing door that leads to the (sealed) bathroom, standing against a wall. `mount` has its
-# local +z pointing into the room. The doorway behind the leaf is black; the main script teleports
-# the player when they walk into it while the door is open. Returns the door leaf.
+# local +z pointing into the room. Behind the leaf is a see-through view of the room on the other side
+# (the main script links its `dest`); walking into the doorway while the door is open moves the player
+# there. Returns the door leaf, which carries the view as meta "view".
 func build_portal_door(mount: Node3D) -> StaticBody3D:
 	var wood := Color(0.5, 0.33, 0.2)
 	var saved: int = main.mesh_layers
 	main.mesh_layers = 1
-	var void_mat: StandardMaterial3D = main._mat(Color(0.01, 0.01, 0.03))
-	void_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	main._prop(main._box(Vector3(0.9, 2.1, 0.04)), Vector3(0, 1.05, 0.03), void_mat, false, Vector3.ZERO, mount)
+	var view := PortalView.new()
+	view.source = mount
+	view.position = Vector3(0, 1.05, 0.03)
+	mount.add_child(view)
 	_b(mount, Vector3(0.1, 2.2, 0.12), Vector3(-0.5, 1.1, 0.06), wood, false)
 	_b(mount, Vector3(0.1, 2.2, 0.12), Vector3(0.5, 1.1, 0.06), wood, false)
 	_b(mount, Vector3(1.1, 0.1, 0.12), Vector3(0, 2.15, 0.06), wood, false)
@@ -1039,6 +1115,7 @@ func build_portal_door(mount: Node3D) -> StaticBody3D:
 	leaf.set_meta("open", false)
 	leaf.set_meta("bath_door", false)
 	leaf.set_meta("open_angle", -1.7)
+	leaf.set_meta("view", view)
 	main.mesh_layers = saved
 	return leaf as StaticBody3D
 
@@ -1050,22 +1127,264 @@ func set_door_open(leaf: Node, is_open: bool) -> void:
 	(leaf.get_meta("pivot") as Node3D).rotation.y = float(leaf.get_meta("open_angle")) if is_open else 0.0
 
 
-# Places the bathroom's alternative doors: free-standing doors against walls of ground-floor rooms.
-func build_portals(count: int) -> void:
+# --- Run-away shower door slots ---
+
+const PORTAL_LANDING := 1.1  # how far in front of a slot's wall the player lands
+const NAV_CELL := 0.25
+
+
+# Places between `min_count` and `max_count` door slots on room walls. Every slot is checked: the spot
+# where the player lands must be inside its room and reachable on foot from the room's entrances, and
+# furniture in the way is removed. If the first passes find too few free walls, furniture is cleared
+# off the wall to make room, so at least `min_count` slots exist whenever the house has the walls.
+func build_portals(min_count: int, max_count: int) -> void:
 	var hosts: Array[Room] = []
 	for i in range(1, rooms.size()):
-		if rooms[i].lvl_lo == 0 and rooms[i].type in ["hallway", "living", "kitchen", "dining", "bedroom"]:
-			hosts.append(rooms[i])
+		var r := rooms[i]
+		if r.type in ["bathroom2", "closet", "stairs", "maze", "tomb", "treasure", "yard", "courtyard", "basement",
+				"tower", "tower_top", "attic"] or r.dark:
+			continue
+		hosts.append(r)
+	if hosts.is_empty():
+		return
 	hosts.shuffle()
 	main.mesh_layers = 1
-	for r in hosts:
-		if portals.size() >= count:
-			break
-		var m := _wall(r, 1.3, 1.0, 0.2)
-		if m == null:
+	for strictness in 3:
+		var goal := max_count if strictness == 0 else min_count
+		var guard := 0
+		while portals.size() < goal and guard < 120:
+			var r: Room = hosts[guard % hosts.size()]
+			guard += 1
+			if _slots_in(r) >= (2 + int(r.rect.get_area() / 30.0) if strictness < 2 else 8):
+				continue
+			_add_portal(r, strictness)
+
+
+func _slots_in(r: Room) -> int:
+	var n := 0
+	for p in portals:
+		if p["room"] == r:
+			n += 1
+	return n
+
+
+func _add_portal(r: Room, strictness: int) -> void:
+	var m: Node3D
+	var used_before := r.used.size()
+	if strictness == 0:
+		m = _wall(r, 1.3, 0.9, 0.15)
+	elif strictness == 1:
+		m = _wall(r, 1.3, 0.5, 0.0)
+	else:
+		var side := randi_range(0, 3)
+		var inner := r.interior()
+		var strip := Rect2(inner.position, Vector2(inner.size.x, 1.7)) if side == 1 \
+				else Rect2(Vector2(inner.position.x, inner.end.y - 1.7), Vector2(inner.size.x, 1.7)) if side == 0 \
+				else Rect2(Vector2(inner.end.x - 1.7, inner.position.y), Vector2(1.7, inner.size.y)) if side == 2 \
+				else Rect2(inner.position, Vector2(1.7, inner.size.y))
+		_clear_rect(r, strip)
+		used_before = r.used.size()
+		m = _wall(r, 1.3, 0.5, 0.0, [side])
+	if m == null:
+		return
+	var door_rect: Rect2 = r.used[r.used.size() - 1] if r.used.size() > used_before else Rect2()
+	var depth := _room_depth(r, m)
+	var landing := m.to_global(Vector3(0, 0.95, PORTAL_LANDING))
+	var near_goal := m.to_global(Vector3(0, 0, 0.5))
+	if depth < PORTAL_LANDING + 0.6 or not _reachable_on_foot(r, [near_goal, landing]):
+		r.used.erase(door_rect)  # give the wall space back
+		m.queue_free()
+		return
+	if not r.used.has(door_rect):
+		r.used.append(door_rect)
+	var leaf := build_portal_door(m)
+	portals.append({"room": r, "mount": m, "leaf": leaf, "landing": landing, "view": leaf.get_meta("view")})
+
+
+# Room size across, measured from the mount into the room.
+func _room_depth(r: Room, mount: Node3D) -> float:
+	var n := mount.global_transform.basis.z
+	var inner := r.interior()
+	return inner.size.y if absf(n.z) > 0.5 else inner.size.x
+
+
+func _node_rect(r: Room, node: Node) -> Rect2:
+	var result := Rect2()
+	var first := true
+	var pending: Array[Node] = [node]
+	while not pending.is_empty():
+		var n: Node = pending.pop_back()
+		pending.append_array(n.get_children())
+		if not (n is CollisionShape3D) or (n as CollisionShape3D).shape == null or (n as CollisionShape3D).disabled:
 			continue
-		var leaf := build_portal_door(m)
-		portals.append({"room": r, "mount": m, "leaf": leaf})
+		var cs := n as CollisionShape3D
+		var box: AABB = cs.global_transform * cs.shape.get_debug_mesh().get_aabb()
+		if box.end.y < r.y0 + 0.2 or box.position.y > r.y0 + 1.7:
+			continue
+		var flat := Rect2(box.position.x, box.position.z, box.size.x, box.size.z)
+		result = flat if first else result.merge(flat)
+		first = false
+	return result if not first else Rect2()
+
+
+# Removes the furniture that touches `area` (and the bottle spots and floor claims that went with it).
+# Returns how many nodes were removed.
+func _clear_rect(r: Room, area: Rect2) -> int:
+	var removed := 0
+	var props: Array = room_furniture.get(r, [])
+	var keep_open: Array[Rect2] = []
+	for o in r.openings:
+		keep_open.append(_opening_rect(r, int(o["side"]), float(o["lo"]), float(o["hi"]), str(o["kind"])))
+	for i in range(props.size() - 1, -1, -1):
+		var node: Node3D = props[i]
+		if not is_instance_valid(node) or node.is_queued_for_deletion():
+			props.remove_at(i)
+			continue
+		var rect := _node_rect(r, node)
+		if not rect.has_area() or not rect.intersects(area):
+			continue
+		props.remove_at(i)
+		node.queue_free()
+		removed += 1
+		for k in range(r.used.size() - 1, -1, -1):
+			if r.used[k].intersects(rect) and not keep_open.has(r.used[k]):
+				r.used.remove_at(k)
+		for k in range(r.spots.size() - 1, -1, -1):
+			if rect.grow(0.15).has_point(Vector2(r.spots[k].x, r.spots[k].z)) and r.spots[k].y > r.y0 + 0.1:
+				r.spots.remove_at(k)
+	for k in range(r.used.size() - 1, -1, -1):
+		if r.used[k].intersects(area) and not keep_open.has(r.used[k]):
+			r.used.remove_at(k)
+	return removed
+
+
+# True when each world point in `goals` can be walked to from an entrance of the room. Furniture that is in
+# the way gets removed (a few rounds, always the pieces on the cheapest route), so the answer is false only
+# when the point can't be reached at all, e.g. outside the walkable floor.
+func _reachable_on_foot(r: Room, goals: Array) -> bool:
+	var inner := r.interior().grow(-0.3)
+	if inner.size.x < 0.4 or inner.size.y < 0.4:
+		return false
+	var cols := int(ceil(inner.size.x / NAV_CELL))
+	var rows := int(ceil(inner.size.y / NAV_CELL))
+	var starts: Array[int] = []
+	for o in r.openings:
+		var mid := (float(o["lo"]) + float(o["hi"])) / 2.0
+		var edge := r.interior()
+		var p: Vector2
+		match int(o["side"]):
+			0:
+				p = Vector2(mid, edge.end.y - 0.5)
+			1:
+				p = Vector2(mid, edge.position.y + 0.5)
+			2:
+				p = Vector2(edge.end.x - 0.5, mid)
+			_:
+				p = Vector2(edge.position.x + 0.5, mid)
+		var cell := _cell_of(inner, p, cols, rows)
+		if cell >= 0:
+			starts.append(cell)
+	if starts.is_empty():
+		return false
+	for goal: Vector3 in goals:
+		var target := _cell_of(inner, Vector2(goal.x, goal.z), cols, rows)
+		if target < 0:
+			return false
+		for round_index in 6:
+			var blockers := _blockers_to(r, inner, cols, rows, starts, target)
+			if blockers.is_empty():
+				break
+			if typeof(blockers[0]) == TYPE_INT:
+				return false
+			for node: Node3D in blockers:
+				_clear_rect(r, _node_rect(r, node).grow(0.02))
+			if round_index == 5:
+				return false
+	return true
+
+
+func _cell_of(inner: Rect2, p: Vector2, cols: int, rows: int) -> int:
+	if not inner.grow(0.05).has_point(p):
+		return -1
+	var cx := clampi(int((p.x - inner.position.x) / NAV_CELL), 0, cols - 1)
+	var cy := clampi(int((p.y - inner.position.y) / NAV_CELL), 0, rows - 1)
+	return cy * cols + cx
+
+
+# The furniture nodes on the route with the fewest obstacles from any start cell to `target`. An empty
+# result means the way is already clear; [-2] means there is no route at all.
+func _blockers_to(r: Room, inner: Rect2, cols: int, rows: int, starts: Array[int], target: int) -> Array:
+	var props: Array = room_furniture.get(r, [])
+	var owner_of := PackedInt32Array()
+	owner_of.resize(cols * rows)
+	owner_of.fill(-1)
+	var rects: Array[Rect2] = []
+	var nodes: Array[Node3D] = []
+	for node: Node3D in props:
+		if not is_instance_valid(node) or node.is_queued_for_deletion():
+			continue
+		var rect := _node_rect(r, node)
+		if rect.has_area():
+			rects.append(rect.grow(0.32))
+			nodes.append(node)
+	for k in rects.size():
+		var rect: Rect2 = rects[k]
+		var cx0 := maxi(0, int(floor((rect.position.x - inner.position.x) / NAV_CELL)))
+		var cx1 := mini(cols - 1, int(floor((rect.end.x - inner.position.x) / NAV_CELL)))
+		var cy0 := maxi(0, int(floor((rect.position.y - inner.position.y) / NAV_CELL)))
+		var cy1 := mini(rows - 1, int(floor((rect.end.y - inner.position.y) / NAV_CELL)))
+		for cy in range(cy0, cy1 + 1):
+			for cx in range(cx0, cx1 + 1):
+				var center := inner.position + Vector2((cx + 0.5) * NAV_CELL, (cy + 0.5) * NAV_CELL)
+				if rect.has_point(center) and owner_of[cy * cols + cx] < 0:
+					owner_of[cy * cols + cx] = k
+	var dist := PackedInt32Array()
+	dist.resize(cols * rows)
+	dist.fill(-1)
+	var parent := PackedInt32Array()
+	parent.resize(cols * rows)
+	parent.fill(-1)
+	var current: Array[int] = []
+	var upcoming: Array[int] = []
+	for s in starts:
+		if dist[s] < 0:
+			dist[s] = 0 if owner_of[s] < 0 else 1
+			(current if dist[s] == 0 else upcoming).append(s)
+	var level := 0
+	while (not current.is_empty() or not upcoming.is_empty()) and dist[target] < 0:
+		if current.is_empty():
+			level += 1
+			current = upcoming
+			upcoming = []
+		while not current.is_empty():
+			var c: int = current.pop_back()
+			var cx := c % cols
+			var cy := c / cols
+			for step in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nx: int = cx + step.x
+				var ny: int = cy + step.y
+				if nx < 0 or ny < 0 or nx >= cols or ny >= rows:
+					continue
+				var n := ny * cols + nx
+				if dist[n] >= 0:
+					continue
+				parent[n] = c
+				if owner_of[n] < 0:
+					dist[n] = level
+					current.append(n)
+				else:
+					dist[n] = level + 1
+					upcoming.append(n)
+	if dist[target] < 0:
+		return [-2]
+	var result: Array = []
+	var at := target
+	while at >= 0:
+		var k := owner_of[at]
+		if k >= 0 and not result.has(nodes[k]):
+			result.append(nodes[k])
+		at = parent[at]
+	return result
 
 
 # Scales the whole house up around the bathroom doorway; the bathroom and the player stay small.
@@ -1078,10 +1397,49 @@ func apply_giant(factor: float) -> void:
 			break
 	scale = Vector3.ONE * factor
 	position = pivot * (1.0 - factor)
+	_fill_giant_doorway(factor)
 	for child in get_children():
 		if child is OmniLight3D:
 			child.omni_range *= factor
 			child.light_energy *= 1.5
+
+
+# Scaling stretches the hallway's opening for the bathroom door to `factor` times the door's size, which
+# leaves the wall above and beside the (unscaled) door open to the void. This fills it with wall in the
+# unscaled world, leaving only the real doorway.
+func _fill_giant_doorway(factor: float) -> void:
+	for c in conns:
+		if c["a"] != rooms[0]:
+			continue
+		var side: int = c["side"]
+		var lo: float = c["lo"]
+		var hi: float = c["hi"]
+		var mid := (lo + hi) / 2.0
+		var half := (hi - lo) / 2.0 * factor
+		var door_top: float = c["y0"] + door_h
+		var open_top: float = c["y0"] + door_h * factor
+		var thick: float = rooms[0].wall_t * factor
+		var boundary: float = c["c"]
+		var away := _side_vec(side)
+		var normal_pos := boundary + (away.z if side < 2 else away.x) * thick / 2.0
+		var pal: Array = PALETTE["hallway"]
+		var mat: Material = main._mat(pal[0])
+		var pieces: Array[Dictionary] = [
+			{"a0": mid - half, "a1": lo, "y0": c["y0"], "y1": open_top},
+			{"a0": hi, "a1": mid + half, "y0": c["y0"], "y1": open_top},
+			{"a0": lo, "a1": hi, "y0": door_top, "y1": open_top},
+		]
+		for piece in pieces:
+			var length: float = piece["a1"] - piece["a0"]
+			var height: float = piece["y1"] - piece["y0"]
+			if length < 0.01 or height < 0.01:
+				continue
+			var along: float = (piece["a0"] + piece["a1"]) / 2.0
+			var size := Vector3(length, height, thick) if side < 2 else Vector3(thick, height, length)
+			var at := Vector3(along, piece["y0"] + height / 2.0, normal_pos) if side < 2 \
+					else Vector3(normal_pos, piece["y0"] + height / 2.0, along)
+			main._prop(main._box(size), at, mat, true, Vector3.ZERO, main)
+		break
 
 
 func toggle_door(body: Node) -> void:
@@ -1140,7 +1498,7 @@ func _build_room(r: Room) -> void:
 	else:
 		var c := r.rect.get_center()
 		var floor_mat: Material
-		if r.type == "courtyard":
+		if r.type == "courtyard" or r.type == "yard":
 			floor_mat = Castle.grass_material(r.rect.size)
 		elif crypt:
 			floor_mat = Crypt.floor_material(r.rect.size)
@@ -1149,13 +1507,15 @@ func _build_room(r: Room) -> void:
 		else:
 			floor_mat = _floor_material(r.type, pal[1], r.rect.size)
 		_p(main._box(Vector3(r.rect.size.x, 0.1, r.rect.size.y)), Vector3(c.x, r.y0 - 0.05, c.y), floor_mat)
-		if r.type != "courtyard":
+		if r.type != "courtyard" and r.type != "yard":
 			var ceiling_mat: Material = main._mat(Castle.DARK_STONE) if castle else main._mat(Color(0.95, 0.95, 0.93))
 			_p(main._box(Vector3(r.rect.size.x, 0.04, r.rect.size.y)), Vector3(c.x, r.y1 - 0.02, c.y), ceiling_mat)
 		build_walls(r, wall_mat)
 		if not r.dark:
 			if r.type == "courtyard":
 				_light(Vector3(c.x, r.y0 + 4.5, c.y), maxf(r.rect.size.x, r.rect.size.y) * 0.9, 0.8)
+			elif r.type == "yard":
+				_light(Vector3(c.x, r.y0 + 5.0, c.y), maxf(r.rect.size.x, r.rect.size.y) * 1.1, 1.0)
 			elif crypt:
 				_light(Vector3(c.x, r.y1 - 0.8, c.y), maxf(r.rect.size.x, r.rect.size.y) * 0.7 + 2.0, 0.22)
 			elif castle:
@@ -1165,12 +1525,18 @@ func _build_room(r: Room) -> void:
 						0.5 if r.type == "attic" else 0.9)
 		if r.boiler:
 			_place_boiler(r)
+		var first_prop := get_child_count()
 		if crypt:
 			Crypt.furnish(self, r)
 		elif castle:
 			Castle.furnish(self, r)
 		else:
 			_furnish(r)
+		var props: Array[Node3D] = []
+		for i in range(first_prop, get_child_count()):
+			if get_child(i) is Node3D:
+				props.append(get_child(i) as Node3D)
+		room_furniture[r] = props
 		_floor_spots(r)
 	main.mesh_layers = 1
 
@@ -1192,6 +1558,8 @@ func _floor_material(type: String, color: Color, size: Vector2) -> Material:
 
 
 func _light(pos: Vector3, range_m: float, energy: float) -> void:
+	if power_out:
+		return
 	var l := OmniLight3D.new()
 	l.position = pos
 	l.omni_range = range_m
@@ -1275,13 +1643,12 @@ func _build_door(c: Dictionary) -> void:
 		# The opening runs floor to ceiling, so the leaf does too: nothing to peek through.
 		leaf_h = 3.0 - 0.02
 		leaf_y = 1.5
-		knob_y = 2.0
 	var leaf_size := Vector3(leaf_w, leaf_h, 0.05) if side < 2 else Vector3(0.05, leaf_h, leaf_w)
 	var leaf_color := Castle.WOOD if castle else Color(0.5, 0.33, 0.2)
 	var vault: bool = (c["b"] as Room).type == "treasure"
 	var tomb: bool = (c["b"] as Room).type == "tomb"
 	if vault:
-		leaf_color = Castle.GOLD
+		leaf_color = Castle.WOOD  # looks like any other castle door; only its label gives it away
 	elif tomb:
 		leaf_color = Color(0.3, 0.31, 0.33)
 	var leaf := _b(pivot, leaf_size, d * (leaf_w / 2.0) + Vector3(0, leaf_y, 0), leaf_color)
@@ -1289,18 +1656,13 @@ func _build_door(c: Dictionary) -> void:
 	var knob_color := Castle.IRON.lightened(0.3) if castle else Color(0.8, 0.7, 0.3)
 	_p(main._cyl(0.025, 0.1), d * (leaf_w / 2.0 - 0.12) + Vector3(0, knob_y - leaf_y, 0),
 			main._mat(knob_color), false, knob_rot, leaf)
-	if upside_down:
-		_p(main._cyl(0.025, 0.1), d * (leaf_w / 2.0 - 0.12) + Vector3(0, 1.0 - leaf_y, 0),
-				main._mat(knob_color), false, knob_rot, leaf)
 	if castle:
 		for band_y in [-0.8, 0.0, 0.8]:
 			var band := Vector3(leaf_size.x, 0.12, 0.07) if side < 2 else Vector3(0.07, 0.12, leaf_size.z)
-			_b(leaf, band, Vector3(0, band_y, 0), Castle.GOLD.darkened(0.35) if vault else Castle.IRON, false)
+			_b(leaf, band, Vector3(0, band_y, 0), Castle.IRON, false)
 		Castle.frame(self, c)
 	if vault:
-		var plate := Vector3(leaf_size.x * 0.5, 0.5, 0.08) if side < 2 else Vector3(0.08, 0.5, leaf_size.z * 0.5)
-		_p(main._box(plate), Vector3(0, 0.3, 0), _glow_material(Color(1.0, 0.85, 0.3)), false, Vector3.ZERO, leaf)
-		_p(_sphere(0.1), Vector3(0, 0.3, 0), main._mat(Color(0.8, 0.1, 0.15)), false, Vector3.ZERO, leaf)
+		pass
 	elif tomb:
 		var rune := Vector3(leaf_size.x * 0.6, 0.12, 0.08) if side < 2 else Vector3(0.08, 0.12, leaf_size.z * 0.6)
 		for rune_y in [-0.4, 0.1, 0.6]:
@@ -1805,11 +2167,11 @@ func _free(r: Room, rect: Rect2) -> bool:
 
 
 # Node on a wall of the room; local +z points into the room. Returns null if nothing fits.
-func _wall(r: Room, width: float, depth: float, clearance := 0.1) -> Node3D:
+func _wall(r: Room, width: float, depth: float, clearance := 0.1, sides: Array = [0, 1, 2, 3]) -> Node3D:
 	var inner := r.interior()
 	var c := inner.get_center()
 	for attempt in 40:
-		var side := randi_range(0, 3)
+		var side: int = sides.pick_random()
 		var length := inner.size.x if side < 2 else inner.size.y
 		var half := length / 2.0 - width / 2.0 - 0.1
 		if half < 0.0:
@@ -1903,6 +2265,8 @@ func _furnish(r: Room) -> void:
 			_furnish_tower(r)
 		"tower_top":
 			_furnish_tower_top(r)
+		"yard":
+			_furnish_yard(r)
 
 
 func _rug(r: Room, size: Vector2, color: Color) -> void:
@@ -2065,18 +2429,23 @@ func _photo_textures() -> Array[Texture2D]:
 	return photos
 
 
-# A framed photo on a wall, sized to the picture's proportions.
+# A framed photo on a wall, sized to the picture's proportions. Every frame in a level gets a different
+# photo until all of them have been used once.
 func _picture(r: Room) -> void:
 	var textures := _photo_textures()
 	if textures.is_empty():
 		return
-	var tex: Texture2D = textures.pick_random()
+	if photo_bag.is_empty():
+		photo_bag.assign(textures)
+		photo_bag.shuffle()
+	var tex: Texture2D = photo_bag.back()
 	var aspect := float(tex.get_width()) / float(tex.get_height())
 	var pic_w := clampf(0.5 * aspect, 0.4, 0.9)
 	var pic_h := pic_w / aspect
 	var m := _wall(r, pic_w + 0.12, 0.05, 0.0)
 	if m == null:
 		return
+	photo_bag.pop_back()
 	_b(m, Vector3(pic_w + 0.1, pic_h + 0.1, 0.03), Vector3(0, 1.6, 0.02), Color(0.35, 0.22, 0.12), false)
 	var mat: StandardMaterial3D = main._mat(Color.WHITE)
 	mat.albedo_texture = tex
@@ -2104,6 +2473,50 @@ func _furnish_bathroom(r: Room) -> void:
 		_b(m, Vector3(1.5, 0.02, 0.6), Vector3(0, 0.56, 0.4), Color(0.65, 0.8, 0.9), false)
 		_b(m, Vector3(0.1, 0.2, 0.1), Vector3(0.7, 0.65, 0.06), Color(0.75, 0.78, 0.8), false)
 		_spot(r, m, Vector3(-0.75, 0.66, 0.4))
+
+
+func _furnish_yard(r: Room) -> void:
+	var inner := r.interior()
+	var c := inner.get_center()
+	var gate_side := 0
+	for o in r.openings:
+		gate_side = int(o["side"])
+	var away := -_side_vec(gate_side)  # from the gate towards the far fence
+	var side_dir := Vector3(away.z, 0, -away.x)
+	var depth := inner.size.y if gate_side < 2 else inner.size.x
+	var stake := Vector3(c.x, r.y0, c.y) + away * depth * 0.15
+	dog_stake = stake
+	var angle := randf() * TAU
+	yard_spot = stake + Vector3(cos(angle), 0, sin(angle)) * 1.1 + Vector3(0, 0.11, 0)
+	r.used.append(Rect2(Vector2(stake.x, stake.z) - Vector2(2.0, 2.0), Vector2(4.0, 4.0)))
+	_p(main._cyl(0.04, 0.5), stake + Vector3(0, 0.25, 0), main._mat(Color(0.45, 0.46, 0.5)), false)
+	var ring := TorusMesh.new()
+	ring.inner_radius = 0.03
+	ring.outer_radius = 0.06
+	_p(ring, stake + Vector3(0, 0.45, 0), main._mat(Color(0.35, 0.36, 0.4)), false, Vector3(90, 0, 0))
+
+	# The kennel stands against the far fence, facing the gate.
+	var kennel := Node3D.new()
+	kennel.position = Vector3(c.x, r.y0, c.y) + away * (depth / 2.0 - 0.9) + side_dir * 2.2
+	kennel.rotation.y = atan2(-away.x, -away.z)
+	add_child(kennel)
+	var wood := Color(0.55, 0.36, 0.2)
+	_b(kennel, Vector3(1.0, 0.8, 1.2), Vector3(0, 0.4, 0), wood)
+	_b(kennel, Vector3(0.45, 0.5, 0.02), Vector3(0, 0.27, 0.605), Color(0.05, 0.04, 0.04), false)
+	for slope in [-1.0, 1.0]:
+		var roof := _b(kennel, Vector3(0.62, 0.05, 1.3), Vector3(slope * 0.27, 0.92, 0), Color(0.6, 0.2, 0.18), false)
+		roof.rotation_degrees.z = -slope * 35.0
+	_p(main._cyl(0.15, 0.06), Vector3(c.x, r.y0 + 0.03, c.y) + away * (depth / 2.0 - 2.0) + side_dir * 0.9,
+			main._mat(Color(0.8, 0.2, 0.2)), false)
+	for i in 6:
+		var bush := Vector3(c.x, r.y0, c.y) + away * randf_range(-depth / 2.0 + 0.6, depth / 2.0 - 0.6) \
+				+ side_dir * (inner.size.x if gate_side < 2 else inner.size.y) * (0.5 if i % 2 == 0 else -0.5) * 0.92
+		_p(_sphere(randf_range(0.35, 0.6)), bush + Vector3(0, 0.3, 0), main._mat(Color(0.15, 0.45, 0.18)), false)
+	for i in 10:
+		var flower := Vector2(randf_range(inner.position.x + 0.5, inner.end.x - 0.5), randf_range(inner.position.y + 0.5, inner.end.y - 0.5))
+		if _free(r, Rect2(flower - Vector2(0.2, 0.2), Vector2(0.4, 0.4))):
+			_p(main._cyl(0.06, 0.03), Vector3(flower.x, r.y0 + 0.02, flower.y), main._mat(
+					[Color(0.95, 0.3, 0.4), Color(0.98, 0.85, 0.2), Color(0.8, 0.5, 0.95)].pick_random()), false)
 
 
 func _furnish_closet(r: Room) -> void:
